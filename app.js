@@ -16,21 +16,17 @@
   client.config.configureEditorPanel([
     { name: 'source', type: 'element' },
 
-    // Sigma only streams data for columns the plugin explicitly requests, so at
-    // least one column entry is required. Roles are still detected automatically.
-    { name: 'dataColumns', type: 'column', source: 'source', allowMultiple: true,
-      label: 'Columns',
-      description: 'Optional if you fill in the role overrides below. Otherwise add every column the pivot uses — row dimensions, the pivot column, the cell values and the color column — and their roles are detected automatically.' },
-
+    // Sigma only streams data for columns named by a `column` entry, so these
+    // three define both the layout and the request scope.
     { name: 'rowColumns', type: 'column', source: 'source', allowMultiple: true,
-      label: 'Left columns (optional override)',
-      description: 'Leave empty to auto-detect from the pivot row dimensions. The first column is the one passed to the row control.' },
+      label: 'Left columns',
+      description: 'The pivot row dimensions, in display order. The first one is passed to the row control unless overridden below.' },
     { name: 'pivotColumn', type: 'column', source: 'source', allowMultiple: false,
-      label: 'Pivot column (optional override)',
-      description: 'Leave empty to auto-detect the crosstab column dimension.' },
+      label: 'Pivot column',
+      description: 'The crosstab column dimension whose values become the column headers.' },
     { name: 'valueColumns', type: 'column', source: 'source', allowMultiple: true,
-      label: 'Cell values (optional override)',
-      description: 'Leave empty to auto-detect. Rendered stacked inside each pill, in order.' },
+      label: 'Cell values',
+      description: 'Rendered stacked inside each pill, in order. A column that is constant per pivot value is moved into the column header instead.' },
 
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
       label: 'Color by column (optional)' },
@@ -194,7 +190,7 @@
     // so the scope is the union of all of them -- filling in the role overrides
     // alone is sufficient, with no need to repeat them under "Columns".
     var requested = [];
-    [asArray(cfg.dataColumns), asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
+    [asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
      asArray(cfg.valueColumns), asArray(cfg.colorColumn),
      asArray(cfg.rowValueColumn), asArray(cfg.columnValueColumn)].forEach(function (group) {
       group.forEach(function (id) {
@@ -207,9 +203,7 @@
     var structural = requested.filter(function (id) { return id !== cfg.colorColumn; });
 
     if (!structural.length) {
-      return message('Add the pivot\'s columns under "Columns" in the editor panel — ' +
-        'row dimensions, the pivot column, the cell values and the color column. ' +
-        'Their roles are detected automatically.');
+      return message('Pick the pivot\'s Left columns, Pivot column and Cell values in the editor panel.');
     }
 
     if (!state.columns) return message('Waiting for column metadata from Sigma…');

@@ -181,7 +181,11 @@
     });
     var excluded = overrides.excludeColumns || [];
     if (explicitValues.length) {
-      result.valueColumns = explicitValues;
+      // A listed column that is constant per pivot value describes the header, so
+      // keep it there only -- otherwise it would render in the header AND the pill.
+      result.valueColumns = explicitValues.filter(function (id) {
+        return columnDims.indexOf(id) === -1 && excluded.indexOf(id) === -1;
+      });
     } else {
       result.valueColumns = colIds.filter(function (id) {
         return rowColumns.indexOf(id) === -1 && columnDims.indexOf(id) === -1 &&
