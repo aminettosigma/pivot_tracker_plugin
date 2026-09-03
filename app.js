@@ -32,8 +32,8 @@
       label: 'Color by column (optional)' },
     { name: 'colorRules', type: 'text', multiline: true,
       label: 'Color rules JSON (optional)',
-      placeholder: '{"Completed":"#1d3a5c","Pending":"#4a3c12"}',
-      description: 'Overrides the auto palette. Flat value:color map, or {"default":..,"values":{..},"rules":[{"op":">=","value":10,"color":"#..."}]}.' },
+      placeholder: '{"isnotnull":"#1d3a5c","isnull":"#f4f5f7"}',
+      description: 'Overrides the auto palette. Flat value:color map, or {"default":..,"values":{..},"rules":[{"op":">=","value":10,"color":"#..."}]}. Presence tests: "isnull" (also null/empty/blank) and "isnotnull" (also notempty/filled) color cells by whether the column has a value -- e.g. {"isnotnull":"#1d3a5c","isnull":"#f4f5f7"} on a Comments column. Whitespace-only text counts as empty.' },
     { name: 'autoPalette', type: 'toggle', label: 'Auto palette for unmatched values',
       defaultValue: true },
 
@@ -47,6 +47,11 @@
     { name: 'columnVariable', type: 'variable', label: 'Control: pivot column value (optional)' },
     { name: 'onCellClick', type: 'action-trigger', label: 'On cell click action (optional)' },
 
+    { name: 'columnStyles', type: 'text', multiline: true,
+      label: 'Column formatting JSON (optional)',
+      placeholder: '{"Operator":{"bold":true,"size":13},"Stage Timestamp":"italic 10px #6b7684"}',
+      description: 'Per-column text style, keyed by column name -- applies to left columns and to the lines inside the pill. Keys: size, bold, italic, underline, uppercase, color, background, align, opacity. Use "*" for all columns, "header" for the pivot column headers, "leftHeader" for the left header row. A string value is shorthand, e.g. "bold 13px #333".' },
+
     { name: 'showValueLabels', type: 'toggle', label: 'Show value-column header row' },
     { name: 'compact', type: 'toggle', label: 'Compact rows' },
     { name: 'darkMode', type: 'toggle', label: 'Dark mode', defaultValue: false,
@@ -56,7 +61,7 @@
 
   var root = document.getElementById('root');
   var state = { config: {}, data: null, columns: null, selected: null };
-  var unsubData = null, unsubCols = null, boundSource = null;
+  var unsubData = null, unsubCols = null, boundKey = null, boundElement = null, lastConfigJson = null;
 
   function asArray(v) {
     if (Array.isArray(v)) return v.filter(Boolean);
@@ -75,13 +80,36 @@
     });
   }
 
-  function bindSource(sourceId) {
-    if (boundSource === sourceId) return;
+  // Columns whose data we need Sigma to stream: the union of every column entry.
+  // Sigma only sends data for columns named by a `column` config entry, so this
+  // set doubles as the request scope and as the data-subscription cache key.
+  function requestedColumns(cfg) {
+    var out = [];
+    [asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
+     asArray(cfg.valueColumns), asArray(cfg.colorColumn),
+     asArray(cfg.rowValueColumn), asArray(cfg.columnValueColumn)].forEach(function (group) {
+      group.forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
+    });
+    return out;
+  }
+
+  /* Re-subscribes when the source changes *or* when the set of requested columns
+     changes -- Sigma streams data for the scope that was in effect at subscribe
+     time, so a newly picked column never arrives until we ask again. Without
+     this, adding a column in the editor panel required a workbook refresh. */
+  function bindSource(sourceId, columnKey) {
+    var key = (sourceId || '') + '|' + columnKey;
+    if (boundKey === key) return;
     if (unsubData) { unsubData(); unsubData = null; }
     if (unsubCols) { unsubCols(); unsubCols = null; }
-    boundSource = sourceId;
-    state.data = null;
-    state.columns = null;
+    boundKey = key;
+    // Keep whatever we already have when only the column scope widened, so the
+    // grid stays on screen instead of flashing "waiting for data" on every edit.
+    if (sourceId !== boundElement) {
+      boundElement = sourceId;
+      state.data = null;
+      state.columns = null;
+    }
     if (!sourceId) { render(); return; }
 
     unsubCols = client.elements.subscribeToElementColumns(sourceId, function (cols) {
@@ -94,14 +122,32 @@
     });
   }
 
-  client.config.subscribe(function (config) {
-    state.config = config || {};
-    bindSource(state.config.source);
+  function applyConfig(config) {
+    config = config || {};
+    var json;
+    try { json = JSON.stringify(config); } catch (e) { json = null; }
+    if (json !== null && json === lastConfigJson) return;
+    lastConfigJson = json;
+
+    state.config = config;
+    bindSource(config.source, requestedColumns(config).join(','));
     render();
-  });
+  }
+
+  client.config.subscribe(applyConfig);
+
+  /* The host emits config once when the init handshake resolves and again on every
+     edit. If the iframe is re-mounted (which Sigma does when settings change) an
+     emission can land before this subscription exists, leaving the plugin parked
+     on its placeholder until the workbook is refreshed. Polling the live config
+     object recovers from any dropped emission; applyConfig() de-dupes, so a
+     steady state costs one small JSON.stringify per tick. */
+  setInterval(function () {
+    try { applyConfig(client.config.get()); } catch (e) { /* host not ready yet */ }
+  }, 400);
 
   // --- which column supplies each passed value ------------------------------
-  // Defaults reproduce the original behaviour (first left column / the pivot
+  // Defaults reproduce the original behavior (first left column / the pivot
   // column); an editor-panel override wins whenever that column is available.
   function passRowId(layout) {
     var pick = state.config.rowValueColumn;
@@ -161,13 +207,6 @@
       setTimeout(function () { next(i + 1); }, 0);
     })(0);
 
-    // Record what was sent so the footer can show it -- the workbook controls are
-    // outside the iframe, so this is the only in-plugin evidence of the handoff.
-    state.lastSent = {
-      row: cfg.rowVariable ? { col: colName(rowColId), value: rowOut, variable: cfg.rowVariable } : null,
-      col: cfg.columnVariable ? { col: colName(pivotColId), value: colOut, variable: cfg.columnVariable } : null
-    };
-
     state.selected = window.PivotDetect.key(rowValue) + '\u0001' + window.PivotDetect.key(pivotValue);
     render();
   }
@@ -186,17 +225,7 @@
 
     if (!cfg.source) return message('Select a pivot table as the data source in the editor panel.');
 
-    // Sigma streams data for every column referenced by any column config entry,
-    // so the scope is the union of all of them -- filling in the role overrides
-    // alone is sufficient, with no need to repeat them under "Columns".
-    var requested = [];
-    [asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
-     asArray(cfg.valueColumns), asArray(cfg.colorColumn),
-     asArray(cfg.rowValueColumn), asArray(cfg.columnValueColumn)].forEach(function (group) {
-      group.forEach(function (id) {
-        if (requested.indexOf(id) === -1) requested.push(id);
-      });
-    });
+    var requested = requestedColumns(cfg);
 
     // A color column on its own carries no layout, so treat that as "not set up
     // yet" and show guidance rather than a detection failure.
@@ -253,6 +282,15 @@
 
     var grid = window.PivotDetect.build(layout, cfg.colorColumn);
     var compiled = window.PivotColors.compile(cfg.colorRules);
+    var styles = window.PivotStyles.compile(cfg.columnStyles);
+
+    // ' style=".."' for a column, or '' so we don't emit empty attributes.
+    function sty(id, slot) {
+      var css = window.PivotStyles.css(
+        window.PivotStyles.forColumn(styles, id ? colName(id) : null, slot));
+      return css ? ' style="' + esc(css) + '"' : '';
+    }
+
     var autoPalette = cfg.autoPalette !== false;
 
     // Stable color domain so palette assignment doesn't shift between renders.
@@ -278,7 +316,7 @@
     layout.rowColumns.forEach(function (id, i) {
       html.push('<th class="lead' + (i === 0 ? ' first' : '') +
         (i === layout.rowColumns.length - 1 ? ' last' : '') + '"' +
-        (showLabels ? ' rowspan="2"' : '') + '>' + esc(colName(id)) + '</th>');
+        (showLabels ? ' rowspan="2"' : '') + sty(id, 'leftHeader') + '>' + esc(colName(id)) + '</th>');
     });
     grid.pivotKeys.forEach(function (pk) {
       // Column-dimension attributes ride along in the header, e.g. PLATING (80).
@@ -286,7 +324,8 @@
         var t = fmt(pk.attrs[id], id);
         return t ? t : null;
       }).filter(Boolean);
-      html.push('<th class="grp" colspan="1" title="' + esc(colName(layout.pivotColumn)) + '">' +
+      html.push('<th class="grp" colspan="1" title="' + esc(colName(layout.pivotColumn)) + '"' +
+        sty(layout.pivotColumn, 'header') + '>' +
         esc(fmt(pk.value, layout.pivotColumn) || '(blank)') +
         (attrs.length ? ' <span class="attr">(' + esc(attrs.join(' \u00b7 ')) + ')</span>' : '') +
         '</th>');
@@ -298,7 +337,7 @@
       html.push('<tr class="hdr-sub">');
       grid.pivotKeys.forEach(function () {
         html.push('<th class="grp-sub">' + layout.valueColumns.map(function (id) {
-          return '<span class="vlabel">' + esc(colName(id)) + '</span>';
+          return '<span class="vlabel"' + sty(id, 'header') + '>' + esc(colName(id)) + '</span>';
         }).join('') + '</th>');
       });
       html.push('</tr>');
@@ -309,7 +348,7 @@
       html.push('<tr>');
       layout.rowColumns.forEach(function (id, i) {
         html.push('<td class="lead' + (i === 0 ? ' first' : '') +
-          (i === layout.rowColumns.length - 1 ? ' last' : '') + '">' +
+          (i === layout.rowColumns.length - 1 ? ' last' : '') + '"' + sty(id) + '>' +
           esc(fmt(row.rowValues[id], id)) + '</td>');
       });
       grid.pivotKeys.forEach(function (pk) {
@@ -333,10 +372,10 @@
           lines = layout.valueColumns.map(function (id, idx) {
             var text = fmt(cell.values[id], id);
             if (!text) return '';
-            return '<span class="line l' + idx + '">' + esc(text) + '</span>';
+            return '<span class="line l' + idx + '"' + sty(id) + '>' + esc(text) + '</span>';
           }).join('');
         } else {
-          lines = '<span class="status">' + esc(fmt(cell.color, cfg.colorColumn)) + '</span>';
+          lines = '<span class="status"' + sty(cfg.colorColumn) + '>' + esc(fmt(cell.color, cfg.colorColumn)) + '</span>';
         }
 
         var tip = layout.valueColumns.map(function (id) {
@@ -360,19 +399,6 @@
 
     html.push('</tbody></table></div>');
 
-    if (state.lastSent) {
-      var sent = [];
-      ['row', 'col'].forEach(function (slot) {
-        var s = state.lastSent[slot];
-        if (!s) return;
-        sent.push('<b>' + esc(s.col) + '</b> = ' + esc(String(s.value)) +
-          ' <span class="vt">\u2192 ' + esc(s.variable) + '</span>');
-      });
-      if (sent.length) {
-        html.push('<div class="sent">Sent to controls: ' + sent.join(' &nbsp;\u00b7&nbsp; ') + '</div>');
-      }
-    }
-
     if (cfg.debug) {
       html.push('<div class="debug"><b>Detected layout</b><pre>' + esc(JSON.stringify({
         rowCount: layout.rowCount,
@@ -386,6 +412,7 @@
         colorColumn: cfg.colorColumn ? colName(cfg.colorColumn) : null,
         colorDomain: domain,
         colorRulesError: compiled.error,
+        columnStylesError: styles.error,
         requestedColumns: requested.length,
         populatedColumns: populated.length,
         rowValuePassed: colName(passRowId(layout)),
@@ -439,5 +466,5 @@
 
   // Placeholder only until the first config callback arrives; subscribe() may fire
   // synchronously, so never overwrite content that has already been rendered.
-  if (!root.innerHTML.trim()) message('Initialising\u2026');
+  if (!root.innerHTML.trim()) message('Initializing\u2026');
 })();

@@ -71,40 +71,72 @@
 
   /* Accepted JSON shapes:
        {"Completed": "#1d3a5c", "Pending": "#4a3c12"}
+       {"isnotnull": "#1d3a5c", "isnull": "#f4f5f7"}
        { "default": "#23262e",
          "values": { "Completed": {"bg":"#1d3a5c","fg":"#cfe3f7"} },
          "rules": [ {"op":">=","value":10,"color":"#4a2118"},
-                    {"contains":"error","color":"#7a1f1f"} ] }  */
+                    {"contains":"error","color":"#7a1f1f"},
+                    {"op":"isnull","color":"#f4f5f7"} ] }  */
+
+  // Reserved keys for presence tests, so "has a comment / has none" needs no rule
+  // array. Recognized in the flat map and under "values".
+  var NULL_KEYS = { 'null': 1, isnull: 1, 'is null': 1, empty: 1, blank: 1, none: 1, 'no value': 1 };
+  var NOT_NULL_KEYS = { notnull: 1, isnotnull: 1, 'is not null': 1, 'not null': 1,
+    notempty: 1, 'not empty': 1, nonempty: 1, filled: 1, 'has value': 1, any: 1 };
+
+  function isNullOp(op) { return !!NULL_KEYS[String(op).toLowerCase()]; }
+  function isNotNullOp(op) { return !!NOT_NULL_KEYS[String(op).toLowerCase()]; }
+
   function compile(json) {
     var parsed = null;
     if (json && String(json).trim()) {
       try { parsed = JSON.parse(json); }
-      catch (e) { return { error: e.message, values: {}, rules: [], fallback: null }; }
+      catch (e) { return { error: e.message, values: {}, rules: [], fallback: null, nullStyle: null, notNullStyle: null }; }
     }
     if (!parsed || typeof parsed !== 'object') {
-      return { error: null, values: {}, rules: [], fallback: null };
+      return { error: null, values: {}, rules: [], fallback: null, nullStyle: null, notNullStyle: null };
     }
 
-    var values = {}, rules = [], fallback = null;
+    var values = {}, rules = [], fallback = null, nullStyle = null, notNullStyle = null;
     var hasEnvelope = parsed.values || parsed.rules || parsed['default'];
 
+    // Presence keys are pulled out of the flat shorthand map rather than matched
+    // by text, so they fire on absent data instead of on a literal "isnull" cell
+    // value. Inside the explicit "values" map every key stays literal, which is
+    // the escape hatch for data that really does read "isnull".
+    function takeValues(map, allowPresence) {
+      Object.keys(map || {}).forEach(function (k) {
+        var s = asStyle(map[k]);
+        if (!s) return;
+        if (allowPresence && isNullOp(k)) nullStyle = s;
+        else if (allowPresence && isNotNullOp(k)) notNullStyle = s;
+        else values[String(k).toLowerCase()] = s;
+      });
+    }
+
     if (hasEnvelope) {
-      Object.keys(parsed.values || {}).forEach(function (k) {
-        var s = asStyle(parsed.values[k]);
-        if (s) values[String(k).toLowerCase()] = s;
+      takeValues(parsed.values, false);
+      // Presence tests may also sit beside "values" as a convenience.
+      Object.keys(parsed).forEach(function (k) {
+        if (k === 'values' || k === 'rules' || k === 'default') return;
+        var s = asStyle(parsed[k]);
+        if (!s) return;
+        if (isNullOp(k)) nullStyle = s;
+        else if (isNotNullOp(k)) notNullStyle = s;
       });
       (parsed.rules || []).forEach(function (r) {
         var s = asStyle(r.color || r.style || r);
-        if (s) rules.push({ op: r.op, value: r.value, contains: r.contains, style: s });
+        if (!s) return;
+        if (isNullOp(r.op)) { nullStyle = nullStyle || s; return; }
+        if (isNotNullOp(r.op)) { notNullStyle = notNullStyle || s; return; }
+        rules.push({ op: r.op, value: r.value, contains: r.contains, style: s });
       });
       fallback = asStyle(parsed['default']);
     } else {
-      Object.keys(parsed).forEach(function (k) {
-        var s = asStyle(parsed[k]);
-        if (s) values[String(k).toLowerCase()] = s;
-      });
+      takeValues(parsed, true);
     }
-    return { error: null, values: values, rules: rules, fallback: fallback };
+    return { error: null, values: values, rules: rules, fallback: fallback,
+      nullStyle: nullStyle, notNullStyle: notNullStyle };
   }
 
   function matchRule(rule, raw) {
@@ -134,7 +166,13 @@
    * @param domain   ordered list of distinct color values, for stable auto assignment
    */
   function resolve(raw, compiled, autoMode, domain) {
-    if (raw === null || raw === undefined || raw === '') return NEUTRAL;
+    // Whitespace-only text counts as "no value" -- a comment of " " is not a comment.
+    var absent = raw === null || raw === undefined ||
+      (typeof raw === 'string' && raw.trim() === '');
+
+    if (absent) {
+      return compiled.nullStyle || compiled.fallback || NEUTRAL;
+    }
 
     var lower = String(raw).toLowerCase();
     if (compiled.values[lower]) return compiled.values[lower];
@@ -142,6 +180,10 @@
     for (var i = 0; i < compiled.rules.length; i++) {
       if (matchRule(compiled.rules[i], raw)) return compiled.rules[i].style;
     }
+
+    // An explicit "anything present" color outranks the auto palette; otherwise
+    // isnotnull would be ignored whenever the palette toggle is on.
+    if (compiled.notNullStyle) return compiled.notNullStyle;
 
     if (autoMode) {
       var idx = domain ? domain.indexOf(String(raw)) : -1;
