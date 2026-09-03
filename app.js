@@ -144,14 +144,32 @@
 
   function handleCellClick(rowValue, pivotValue, rowColId, pivotColId) {
     var cfg = state.config;
+    var rowOut = typedValue(rowValue, rowColId);
+    var colOut = typedValue(pivotValue, pivotColId);
+
     // Variables and action triggers live on client.config, not on the client root.
-    if (cfg.rowVariable) {
-      client.config.setVariable(cfg.rowVariable, typedValue(rowValue, rowColId));
-    }
-    if (cfg.columnVariable) {
-      client.config.setVariable(cfg.columnVariable, typedValue(pivotValue, pivotColId));
-    }
-    if (cfg.onCellClick) client.config.triggerAction(cfg.onCellClick);
+    // Two sets fired in the same tick can be coalesced, dropping the first, so
+    // send them on separate ticks and trigger the action once both have landed.
+    var pending = [];
+    if (cfg.rowVariable) pending.push([cfg.rowVariable, rowOut]);
+    if (cfg.columnVariable) pending.push([cfg.columnVariable, colOut]);
+
+    (function next(i) {
+      if (i >= pending.length) {
+        if (cfg.onCellClick) client.config.triggerAction(cfg.onCellClick);
+        return;
+      }
+      client.config.setVariable(pending[i][0], pending[i][1]);
+      setTimeout(function () { next(i + 1); }, 0);
+    })(0);
+
+    // Record what was sent so the footer can show it -- the workbook controls are
+    // outside the iframe, so this is the only in-plugin evidence of the handoff.
+    state.lastSent = {
+      row: cfg.rowVariable ? { col: colName(rowColId), value: rowOut, variable: cfg.rowVariable } : null,
+      col: cfg.columnVariable ? { col: colName(pivotColId), value: colOut, variable: cfg.columnVariable } : null
+    };
+
     state.selected = window.PivotDetect.key(rowValue) + '\u0001' + window.PivotDetect.key(pivotValue);
     render();
   }
@@ -339,6 +357,19 @@
     });
 
     html.push('</tbody></table></div>');
+
+    if (state.lastSent) {
+      var sent = [];
+      ['row', 'col'].forEach(function (slot) {
+        var s = state.lastSent[slot];
+        if (!s) return;
+        sent.push('<b>' + esc(s.col) + '</b> = ' + esc(String(s.value)) +
+          ' <span class="vt">\u2192 ' + esc(s.variable) + '</span>');
+      });
+      if (sent.length) {
+        html.push('<div class="sent">Sent to controls: ' + sent.join(' &nbsp;\u00b7&nbsp; ') + '</div>');
+      }
+    }
 
     if (cfg.debug) {
       html.push('<div class="debug"><b>Detected layout</b><pre>' + esc(JSON.stringify({

@@ -91,6 +91,14 @@
   }
   .debug b { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
   .debug pre { margin: 6px 0 0; font-size: 10.5px; color: #48525f; white-space: pre-wrap; }
+  /* Confirms the click handoff; the workbook controls live outside the iframe. */
+  .sent {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 6px 12px; font-size: 11px; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto;
+  }
+  .sent b { color: var(--text); font-weight: 600; }
+  .sent .vt { color: #9aa4b2; }
 </style>
 </head>
 <body>
