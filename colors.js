@@ -1,4 +1,4 @@
-/* Pill colour resolution: auto-palette by default, JSON rules override. */
+/* Pill color resolution: auto-palette by default, JSON rules override. */
 (function (global) {
   'use strict';
 
@@ -104,10 +104,10 @@
   }
 
   /**
-   * @param raw      the value of the colour column for this cell
+   * @param raw      the value of the color column for this cell
    * @param compiled output of compile()
-   * @param autoMode when true, unmatched values get a stable palette colour
-   * @param domain   ordered list of distinct colour values, for stable auto assignment
+   * @param autoMode when true, unmatched values get a stable palette color
+   * @param domain   ordered list of distinct color values, for stable auto assignment
    */
   function resolve(raw, compiled, autoMode, domain) {
     if (raw === null || raw === undefined || raw === '') return NEUTRAL;

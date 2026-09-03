@@ -1,5 +1,5 @@
 /* Pivot Tracker — renders a Sigma pivot-table element as a pill grid with
-   sticky left columns, inherited column formatting, rule-driven pill colours,
+   sticky left columns, inherited column formatting, rule-driven pill colors,
    and click-through into workbook controls. */
 (function () {
   'use strict';
@@ -20,7 +20,7 @@
     // least one column entry is required. Roles are still detected automatically.
     { name: 'dataColumns', type: 'column', source: 'source', allowMultiple: true,
       label: 'Columns',
-      description: 'Optional if you fill in the role overrides below. Otherwise add every column the pivot uses — row dimensions, the pivot column, the cell values and the colour column — and their roles are detected automatically.' },
+      description: 'Optional if you fill in the role overrides below. Otherwise add every column the pivot uses — row dimensions, the pivot column, the cell values and the color column — and their roles are detected automatically.' },
 
     { name: 'rowColumns', type: 'column', source: 'source', allowMultiple: true,
       label: 'Left columns (optional override)',
@@ -33,15 +33,21 @@
       description: 'Leave empty to auto-detect. Rendered stacked inside each pill, in order.' },
 
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
-      label: 'Colour by column (optional)' },
+      label: 'Color by column (optional)' },
     { name: 'colorRules', type: 'text', multiline: true,
-      label: 'Colour rules JSON (optional)',
+      label: 'Color rules JSON (optional)',
       placeholder: '{"Completed":"#1d3a5c","Pending":"#4a3c12"}',
-      description: 'Overrides the auto palette. Flat value:colour map, or {"default":..,"values":{..},"rules":[{"op":">=","value":10,"color":"#..."}]}.' },
+      description: 'Overrides the auto palette. Flat value:color map, or {"default":..,"values":{..},"rules":[{"op":">=","value":10,"color":"#..."}]}.' },
     { name: 'autoPalette', type: 'toggle', label: 'Auto palette for unmatched values',
       defaultValue: true },
 
+    { name: 'rowValueColumn', type: 'column', source: 'source', allowMultiple: false,
+      label: 'Row value to pass (optional)',
+      description: 'Which left column\'s value is sent to the row control on click. Defaults to the first left column.' },
     { name: 'rowVariable', type: 'variable', label: 'Control: row value (optional)' },
+    { name: 'columnValueColumn', type: 'column', source: 'source', allowMultiple: false,
+      label: 'Column value to pass (optional)',
+      description: 'Which column supplies the value sent to the pivot-column control. Defaults to the pivot column itself; may also be one of its header attributes.' },
     { name: 'columnVariable', type: 'variable', label: 'Control: pivot column value (optional)' },
     { name: 'onCellClick', type: 'action-trigger', label: 'On cell click action (optional)' },
 
@@ -96,14 +102,53 @@
     render();
   });
 
+  // --- which column supplies each passed value ------------------------------
+  // Defaults reproduce the original behaviour (first left column / the pivot
+  // column); an editor-panel override wins whenever that column is available.
+  function passRowId(layout) {
+    var pick = state.config.rowValueColumn;
+    if (pick && layout.rowColumns.indexOf(pick) !== -1) return pick;
+    return layout.rowKey;
+  }
+
+  function passColId(layout) {
+    var pick = state.config.columnValueColumn;
+    if (!pick) return layout.pivotColumn;
+    if (pick === layout.pivotColumn) return pick;
+    if ((layout.columnDims || []).indexOf(pick) !== -1) return pick;
+    return layout.pivotColumn;
+  }
+
+  function blank(v) { return v === null || v === undefined ? '' : v; }
+
+  function rowPassValue(row, layout) { return blank(row.rowValues[passRowId(layout)]); }
+
+  function colPassValue(pk, layout) {
+    var id = passColId(layout);
+    if (id === layout.pivotColumn) return blank(pk.value);
+    return blank((pk.attrs || {})[id]);
+  }
+
   // --- cell click -> workbook controls -------------------------------------
+  // DOM data attributes are always strings; send numeric columns back as numbers
+  // so numeric workbook controls accept the value.
+  function typedValue(raw, colId) {
+    if (raw === null || raw === undefined || raw === '') return '';
+    var type = (state.columns && state.columns[colId] || {}).columnType;
+    if (type === 'number' || type === 'integer') {
+      var n = Number(raw);
+      if (!isNaN(n)) return n;
+    }
+    return String(raw);
+  }
+
   function handleCellClick(rowValue, pivotValue, rowColId, pivotColId) {
     var cfg = state.config;
     if (cfg.rowVariable) {
-      client.setVariable(cfg.rowVariable, rowValue === null || rowValue === undefined ? '' : String(rowValue));
+      client.setVariable(cfg.rowVariable, typedValue(rowValue, rowColId));
     }
     if (cfg.columnVariable) {
-      client.setVariable(cfg.columnVariable, pivotValue === null || pivotValue === undefined ? '' : String(pivotValue));
+      client.setVariable(cfg.columnVariable, typedValue(pivotValue, pivotColId));
     }
     if (cfg.onCellClick) client.triggerAction(cfg.onCellClick);
     state.selected = window.PivotDetect.key(rowValue) + '\u0001' + window.PivotDetect.key(pivotValue);
@@ -123,19 +168,20 @@
     // alone is sufficient, with no need to repeat them under "Columns".
     var requested = [];
     [asArray(cfg.dataColumns), asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
-     asArray(cfg.valueColumns), asArray(cfg.colorColumn)].forEach(function (group) {
+     asArray(cfg.valueColumns), asArray(cfg.colorColumn),
+     asArray(cfg.rowValueColumn), asArray(cfg.columnValueColumn)].forEach(function (group) {
       group.forEach(function (id) {
         if (requested.indexOf(id) === -1) requested.push(id);
       });
     });
 
-    // A colour column on its own carries no layout, so treat that as "not set up
+    // A color column on its own carries no layout, so treat that as "not set up
     // yet" and show guidance rather than a detection failure.
     var structural = requested.filter(function (id) { return id !== cfg.colorColumn; });
 
     if (!structural.length) {
       return message('Add the pivot\'s columns under "Columns" in the editor panel — ' +
-        'row dimensions, the pivot column, the cell values and the colour column. ' +
+        'row dimensions, the pivot column, the cell values and the color column. ' +
         'Their roles are detected automatically.');
     }
 
@@ -152,7 +198,7 @@
     }
 
     if (cfg.colorColumn && requested.indexOf(cfg.colorColumn) === -1) {
-      return message('The colour column is not available in this element\'s data.', 'error');
+      return message('The color column is not available in this element\'s data.', 'error');
     }
 
     // Scope detection to the requested columns, preserving the editor's order.
@@ -188,7 +234,7 @@
     var compiled = window.PivotColors.compile(cfg.colorRules);
     var autoPalette = cfg.autoPalette !== false;
 
-    // Stable colour domain so palette assignment doesn't shift between renders.
+    // Stable color domain so palette assignment doesn't shift between renders.
     var domain = [];
     if (cfg.colorColumn) {
       var seen = Object.create(null);
@@ -255,12 +301,12 @@
         });
         var hasColor = cfg.colorColumn && cell.color !== null && cell.color !== undefined && cell.color !== '';
         // A cell with no measures but a known status still matters -- show the
-        // coloured pill (labelled with the status) rather than dropping it.
+        // colored pill (labelled with the status) rather than dropping it.
         if (!hasValue && !hasColor) { html.push('<td class="cell empty"></td>'); return; }
 
         var style = window.PivotColors.resolve(cell.color, compiled, autoPalette, domain);
-        var selKey = window.PivotDetect.key(row.rowValues[layout.rowKey]) + '\u0001' +
-                     window.PivotDetect.key(pk.value);
+        var selKey = window.PivotDetect.key(rowPassValue(row, layout)) + '\u0001' +
+                     window.PivotDetect.key(colPassValue(pk, layout));
         var lines;
         if (hasValue) {
           lines = layout.valueColumns.map(function (id, idx) {
@@ -284,8 +330,8 @@
           (state.selected === selKey ? ' sel' : '') + '"' +
           ' style="background:' + esc(style.bg) + ';color:' + esc(style.fg) +
           ';border-color:' + esc(style.border) + '"' +
-          ' data-row="' + esc(String(row.rowValues[layout.rowKey])) + '"' +
-          ' data-col="' + esc(String(pk.value === null || pk.value === undefined ? '' : pk.value)) + '"' +
+          ' data-row="' + esc(String(rowPassValue(row, layout))) + '"' +
+          ' data-col="' + esc(String(colPassValue(pk, layout))) + '"' +
           ' title="' + esc(tip.join('\n')) + '">' + lines + '</button></td>');
       });
       html.push('</tr>');
@@ -308,6 +354,8 @@
         colorRulesError: compiled.error,
         requestedColumns: requested.length,
         populatedColumns: populated.length,
+        rowValuePassed: colName(passRowId(layout)),
+        columnValuePassed: colName(passColId(layout)),
         formats: Object.keys(state.columns).reduce(function (acc, id) {
           acc[state.columns[id].name] = {
             type: state.columns[id].columnType, format: state.columns[id].format || null
@@ -324,7 +372,7 @@
     Array.prototype.forEach.call(root.querySelectorAll('.pill'), function (btn) {
       btn.addEventListener('click', function () {
         handleCellClick(btn.getAttribute('data-row'), btn.getAttribute('data-col'),
-          layout.rowKey, layout.pivotColumn);
+          passRowId(layout), passColId(layout));
       });
     });
   }
