@@ -20,7 +20,7 @@
     // least one column entry is required. Roles are still detected automatically.
     { name: 'dataColumns', type: 'column', source: 'source', allowMultiple: true,
       label: 'Columns',
-      description: 'Add every column the pivot uses: row dimensions, the pivot column, the cell values, and the colour column. Their roles are detected automatically.' },
+      description: 'Optional if you fill in the role overrides below. Otherwise add every column the pivot uses — row dimensions, the pivot column, the cell values and the colour column — and their roles are detected automatically.' },
 
     { name: 'rowColumns', type: 'column', source: 'source', allowMultiple: true,
       label: 'Left columns (optional override)',
@@ -118,8 +118,22 @@
     var cfg = state.config;
     if (!cfg.source) return message('Select a pivot table as the data source in the editor panel.');
 
-    var requested = asArray(cfg.dataColumns);
-    if (!requested.length) {
+    // Sigma streams data for every column referenced by any column config entry,
+    // so the scope is the union of all of them -- filling in the role overrides
+    // alone is sufficient, with no need to repeat them under "Columns".
+    var requested = [];
+    [asArray(cfg.dataColumns), asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
+     asArray(cfg.valueColumns), asArray(cfg.colorColumn)].forEach(function (group) {
+      group.forEach(function (id) {
+        if (requested.indexOf(id) === -1) requested.push(id);
+      });
+    });
+
+    // A colour column on its own carries no layout, so treat that as "not set up
+    // yet" and show guidance rather than a detection failure.
+    var structural = requested.filter(function (id) { return id !== cfg.colorColumn; });
+
+    if (!structural.length) {
       return message('Add the pivot\'s columns under "Columns" in the editor panel — ' +
         'row dimensions, the pivot column, the cell values and the colour column. ' +
         'Their roles are detected automatically.');
@@ -138,8 +152,7 @@
     }
 
     if (cfg.colorColumn && requested.indexOf(cfg.colorColumn) === -1) {
-      return message('The colour column "' + colName(cfg.colorColumn) + '" must also be ' +
-        'added under "Columns" so Sigma sends its data.', 'error');
+      return message('The colour column is not available in this element\'s data.', 'error');
     }
 
     // Scope detection to the requested columns, preserving the editor's order.
@@ -159,9 +172,13 @@
     });
 
     if (!layout.rowKey || !layout.pivotColumn) {
+      var missing = requested.filter(function (id) { return !Array.isArray(state.data[id]); });
       return message(
         'Could not auto-detect the pivot layout (' + (layout.reason || 'unknown') + '). ' +
-        'Set the left columns and pivot column overrides in the editor panel.', 'error');
+        'Received data for ' + Object.keys(scopedData).length + ' of ' + requested.length +
+        ' configured column(s)' +
+        (missing.length ? '; no data for: ' + missing.map(colName).join(', ') : '') +
+        '. Set the left columns and pivot column overrides in the editor panel.', 'error');
     }
     if (!layout.valueColumns.length) {
       return message('No value columns found for the pivot cells.', 'error');
