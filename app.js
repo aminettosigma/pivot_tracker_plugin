@@ -53,6 +53,8 @@
 
     { name: 'showValueLabels', type: 'toggle', label: 'Show value-column header row' },
     { name: 'compact', type: 'toggle', label: 'Compact rows' },
+    { name: 'darkMode', type: 'toggle', label: 'Dark mode', defaultValue: false,
+      description: 'Off (default) matches Sigma\'s light workbook surface. On switches the grid and pill palette to dark.' },
     { name: 'debug', type: 'toggle', label: 'Show detection diagnostics' }
   ]);
 
@@ -180,6 +182,12 @@
 
   function render() {
     var cfg = state.config;
+
+    // Theme first, so it applies to message states too, not just the grid.
+    var dark = !!cfg.darkMode;
+    document.body.classList.toggle('dark', dark);
+    window.PivotColors.setTheme(dark ? 'dark' : 'light');
+
     if (!cfg.source) return message('Select a pivot table as the data source in the editor panel.');
 
     // Sigma streams data for every column referenced by any column config entry,

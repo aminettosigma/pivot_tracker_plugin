@@ -3,7 +3,7 @@
   'use strict';
 
   // Light, Sigma-native palette: soft tinted fills with dark readable text.
-  var PALETTE = [
+  var LIGHT_PALETTE = [
     { bg: '#e3edfb', fg: '#1b3f6b', border: '#bcd4f2' },
     { bg: '#fdf1d4', fg: '#6b4e0d', border: '#f0dda6' },
     { bg: '#dff2e9', fg: '#14543c', border: '#b6e0cd' },
@@ -13,7 +13,31 @@
     { bg: '#eaeaf6', fg: '#33356b', border: '#cdcde8' },
     { bg: '#f2f0dc', fg: '#5a5417', border: '#dedaad' }
   ];
-  var NEUTRAL = { bg: '#f4f5f7', fg: '#6b7684', border: '#e4e7ec' };
+  var LIGHT_NEUTRAL = { bg: '#f4f5f7', fg: '#6b7684', border: '#e4e7ec' };
+
+  // Dark counterpart: same hue order, deep muted fills with light text.
+  var DARK_PALETTE = [
+    { bg: '#1c3050', fg: '#bcd6f7', border: '#2b4a72' },
+    { bg: '#3d3116', fg: '#f0dca4', border: '#544325' },
+    { bg: '#153a2c', fg: '#a9dcc4', border: '#22513e' },
+    { bg: '#33203a', fg: '#dcb8e6', border: '#472e50' },
+    { bg: '#42231a', fg: '#f3bda9', border: '#5a332a' },
+    { bg: '#16303d', fg: '#a8cfe1', border: '#234353' },
+    { bg: '#22233f', fg: '#c0c2e8', border: '#333457' },
+    { bg: '#343218', fg: '#dfd9a6', border: '#494628' }
+  ];
+  var DARK_NEUTRAL = { bg: '#23272e', fg: '#8b96a5', border: '#333944' };
+
+  var PALETTE = LIGHT_PALETTE;
+  var NEUTRAL = LIGHT_NEUTRAL;
+
+  // The pill palette has to follow the shell theme, so app.js flips it alongside
+  // the CSS variables rather than each resolve() call carrying a theme argument.
+  function setTheme(name) {
+    var dark = name === 'dark';
+    PALETTE = dark ? DARK_PALETTE : LIGHT_PALETTE;
+    NEUTRAL = dark ? DARK_NEUTRAL : LIGHT_NEUTRAL;
+  }
 
   function hash(str) {
     var h = 0;
@@ -129,6 +153,9 @@
   }
 
   global.PivotColors = {
-    compile: compile, resolve: resolve, PALETTE: PALETTE, NEUTRAL: NEUTRAL, readableOn: readableOn
+    compile: compile, resolve: resolve, setTheme: setTheme,
+    get PALETTE() { return PALETTE; },
+    get NEUTRAL() { return NEUTRAL; },
+    readableOn: readableOn
   };
 })(window);

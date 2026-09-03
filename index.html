@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Pivot Tracker</title>
 <style>
-  /* Light theme matching Sigma's default workbook surface. */
+  /* Light theme matching Sigma's default workbook surface. Light is the default;
+     app.js adds .dark to <body> when the editor-panel toggle is on. */
   :root {
     --bg: #ffffff;
     --panel: #f7f8fa;
@@ -14,6 +15,19 @@
     --text: #1f2733;
     --muted: #6b7684;
     --accent: #2d6cdf;
+    --danger: #b4342a;
+    --hover: #f2f6fd;
+  }
+  body.dark {
+    --bg: #1a1d23;
+    --panel: #22262e;
+    --line: #333944;
+    --line-soft: #2a2f38;
+    --text: #e6eaf0;
+    --muted: #9aa6b6;
+    --accent: #5a9bff;
+    --danger: #ff8a7d;
+    --hover: #262b34;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
@@ -24,7 +38,7 @@
   #root { height: 100%; display: flex; flex-direction: column; }
 
   .msg { padding: 16px; color: var(--muted); }
-  .msg.error { color: #b4342a; }
+  .msg.error { color: var(--danger); }
 
   .wrap { flex: 1; overflow: auto; }
 
@@ -57,7 +71,7 @@
   td.lead { font-size: 12px; border-bottom: 1px solid var(--line-soft); }
   td.lead.first, th.lead.first { font-weight: 700; }
 
-  tbody tr:hover td.lead { background: #f2f6fd; }
+  tbody tr:hover td.lead { background: var(--hover); }
   tbody td { border-bottom: 1px solid var(--line-soft); }
 
   td.cell { padding: 3px 4px; vertical-align: middle; border-left: 1px solid var(--line-soft); }
@@ -90,7 +104,7 @@
     padding: 8px 12px; max-height: 40%; overflow: auto;
   }
   .debug b { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
-  .debug pre { margin: 6px 0 0; font-size: 10.5px; color: #48525f; white-space: pre-wrap; }
+  .debug pre { margin: 6px 0 0; font-size: 10.5px; color: var(--muted); white-space: pre-wrap; }
   /* Confirms the click handoff; the workbook controls live outside the iframe. */
   .sent {
     border-top: 1px solid var(--line); background: var(--panel);
@@ -98,7 +112,7 @@
     overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto;
   }
   .sent b { color: var(--text); font-weight: 600; }
-  .sent .vt { color: #9aa4b2; }
+  .sent .vt { color: var(--muted); opacity: .8; }
 </style>
 </head>
 <body>
