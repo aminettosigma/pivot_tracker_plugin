@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pivot Tracker</title>
+<style>
+  /* Light theme matching Sigma's default workbook surface. */
+  :root {
+    --bg: #ffffff;
+    --panel: #f7f8fa;
+    --line: #e4e7ec;
+    --line-soft: #eef0f3;
+    --text: #1f2733;
+    --muted: #6b7684;
+    --accent: #2d6cdf;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  #root { height: 100%; display: flex; flex-direction: column; }
+
+  .msg { padding: 16px; color: var(--muted); }
+  .msg.error { color: #b4342a; }
+
+  .wrap { flex: 1; overflow: auto; }
+
+  table.pivot { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }
+
+  thead th {
+    position: sticky; top: 0; z-index: 3;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted); text-align: left;
+    padding: 7px 10px; white-space: nowrap;
+  }
+  tr.hdr-sub th { top: 29px; z-index: 3; padding-top: 0; border-bottom: 1px solid var(--line); }
+
+  th.grp { text-align: center; color: var(--text); border-left: 1px solid var(--line-soft); }
+  th.grp .attr { color: var(--muted); font-weight: 600; }
+  th.grp-sub { text-align: center; border-left: 1px solid var(--line-soft); }
+  .vlabel { display: inline-block; padding: 0 5px; color: var(--muted); font-size: 9px; letter-spacing: .04em; }
+  .vlabel + .vlabel { border-left: 1px solid var(--line); }
+
+  /* Every left column is pinned; cumulative `left` offsets are set after layout. */
+  th.lead, td.lead {
+    position: sticky; z-index: 2;
+    background: var(--bg);
+    padding: 6px 12px; white-space: nowrap; color: var(--text);
+  }
+  th.lead { background: var(--panel); z-index: 4; }
+  th.lead.last, td.lead.last { border-right: 1px solid var(--line); }
+  td.lead { font-size: 12px; border-bottom: 1px solid var(--line-soft); }
+  td.lead.first, th.lead.first { font-weight: 700; }
+
+  tbody tr:hover td.lead { background: #f2f6fd; }
+  tbody td { border-bottom: 1px solid var(--line-soft); }
+
+  td.cell { padding: 3px 4px; vertical-align: middle; border-left: 1px solid var(--line-soft); }
+  td.cell.empty { background: transparent; }
+
+  .pill {
+    display: flex; flex-direction: column; gap: 1px;
+    width: 100%; min-width: 104px; min-height: 22px;
+    padding: 5px 8px;
+    border: 1px solid transparent; border-radius: 6px;
+    font: inherit; text-align: left; cursor: pointer;
+    transition: filter .12s ease, box-shadow .12s ease;
+  }
+  .pill:hover { filter: brightness(.96); }
+  .pill.sel { box-shadow: 0 0 0 2px var(--accent); }
+  .pill.blank { opacity: .75; }
+  .pill .line {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-size: 10px; opacity: .8;
+  }
+  .pill .line.l0 { opacity: .9; }
+  .pill .line.l1 { font-size: 11px; font-weight: 600; opacity: 1; }
+  .pill .status { font-size: 10px; font-weight: 600; opacity: .85; }
+
+  .compact .pill { padding: 3px 7px; min-width: 92px; }
+  .compact td.lead { padding: 3px 12px; }
+
+  .debug {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 8px 12px; max-height: 40%; overflow: auto;
+  }
+  .debug b { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+  .debug pre { margin: 6px 0 0; font-size: 10.5px; color: #48525f; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+  <!-- React must be on window before the SDK UMD bundle, which reads it as a global peer. -->
+  <script src="vendor/react.min.js"></script>
+  <script src="vendor/react-dom.min.js"></script>
+  <script src="vendor/sigma-plugin.js"></script>
+  <script src="format.js"></script>
+  <script src="pivot.js"></script>
+  <script src="colors.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

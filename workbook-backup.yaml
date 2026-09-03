@@ -1,0 +1,218 @@
+workbookId: d4a4cebd-ef94-41ff-9627-30b41cc61c60
+name: Natera Plate Tracker - Stage Data
+url: https://app.sigmacomputing.com/papercrane/workbook/Natera-Plate-Tracker-Stage-Data-6tfGOEV97GC9VxLfMXa4Uw
+documentVersion: 5
+latestDocumentVersion: 5
+ownerId: DFljt7J79Y580jxIPAU2DyNQQo4A0
+folderId: 6ec9fe8e-3695-426e-a66c-4b045f7327fe
+createdBy: DFljt7J79Y580jxIPAU2DyNQQo4A0
+updatedBy: DFljt7J79Y580jxIPAU2DyNQQo4A0
+createdAt: '2026-09-03T16:42:58.556Z'
+updatedAt: '2026-09-03T17:30:03.214Z'
+description: >-
+  Long-format plate x workflow-stage data from a custom SQL query. STAGE is a row dimension (crosstab-ready); each
+  crosstab cell is split into STAGE_TIMESTAMP, OPERATOR and WITNESS.
+document:
+  schemaVersion: 1
+  elements:
+    - id: el-plate-stages
+      kind: table
+      source:
+        connectionId: bee6615c-7d11-435c-8819-e32207b27fe4
+        statement: |
+          WITH roster AS (
+            SELECT * FROM VALUES
+              (1,'Haley Cravalho'),(2,'Savanna Pflug'),(3,'Kedear Iyer'),(4,'William Cook'),
+              (5,'Kelly Zelaya'),(6,'Kolin Foster'),(7,'Andrea Spiller'),(8,'Andy Munoz'),
+              (9,'Robinson Dinh'),(10,'Tamyah Jones'),(11,'Joey Zhou'),(12,'Mina Molenka'),
+              (13,'Ana Khomych'),(14,'Hyeonsik Lee'),(15,'Alice Huang'),(16,'Adrian Laguil'),
+              (17,'Jutta Deia Vict'),(18,'Hendrysha Ma'),(19,'Jamie Castillo'),(20,'Mary Robles'),
+              (21,'Omar Rocha'),(22,'Veronica Swett'),(23,'Annaka Green')
+              AS r(ORD, FULL_NAME)
+          ), plates AS (
+            SELECT * FROM VALUES
+              ('A11345','G64','AN3328','SIG-Austin',          0,13),
+              ('A11346','X16','AN3328','SIG-Austin',          1,13),
+              ('A11347','X16','AN3328','SIG-Austin',          2,13),
+              ('A11348','X16','AN3329','SIG-San Carlos',      3,12),
+              ('A11349','X16','AN3329','SIG-San Carlos',      4,12),
+              ('A11350','X16','AN3329','SIG-San Carlos',      5,12),
+              ('A11351','X16','AN3330','SIG-Austin',          6,11),
+              ('A11352','X16','AN3330','SIG-Austin',          7,11),
+              ('A11353','X16','AN3330','SIG-Austin',          8,11),
+              ('A11354','X16','AN3331','SIG-San Carlos',      9, 9),
+              ('A11355','X16','AN3331','SIG-San Carlos',     10, 9),
+              ('A11356','X16','AN3331','SIG-San Carlos',     11, 9),
+              ('A11357','X16','AN3332','SIG-Austin',         12, 8),
+              ('A11358','X16','AN3332','SIG-Austin',         13, 8),
+              ('A11359','X16','AN3332','SIG-Austin',         14, 8),
+              ('A11360','X16','AN3333','SIG-San Carlos',     15, 8),
+              ('A11361','X16+G64','AN3333','SIG-San Carlos', 16, 8),
+              ('A11362','X16+G64','AN3333','SIG-San Carlos', 17, 8)
+              AS p(PLATE_ID, PLEX, BATCH_ID, LAB_SITE, PLATE_SEQ, STAGES_COMPLETE)
+          ), stages AS (
+            SELECT * FROM VALUES
+              ( 1,'PLATING',        80, 0),
+              ( 2,'1ST SS',         80, 2),
+              ( 3,'2ND SS',         80, 3),
+              ( 4,'QUANT-IT',       72, 5),
+              ( 5,'NORM',           64, 8),
+              ( 6,'ER',             64,10),
+              ( 7,'AT',             56,12),
+              ( 8,'LIGATION',       50,14),
+              ( 9,'LIG EDTA',       50,16),
+              (10,'1ST PUR',        50,17),
+              (11,'POST PUR STAMP', 50,19),
+              (12,'LIB AMP',        50,21),
+              (13,'2ND PUR',        50,24)
+              AS s(STAGE_SEQ, STAGE, STAGE_CAPACITY, OFFSET_HOURS)
+          ), step_comments AS (
+            SELECT * FROM VALUES
+              ('A11345','PLATING','Well A1 flagged low volume - re-pipetted, OK'),
+              ('A11345','2ND SS','Reagent lot 22841 swapped mid-run'),
+              ('A11347','NORM','Norm plate re-read, CV within spec'),
+              ('A11349','PLATING','Thermocycler 3 door alarm - run restarted'),
+              ('A11352','AT','Held 20 min for QC sign-off')
+              AS c(PLATE_ID, STAGE, STEP_COMMENT)
+          ), grid AS (
+            SELECT
+              p.PLATE_ID, p.PLEX, p.BATCH_ID, p.LAB_SITE,
+              s.STAGE, s.STAGE_SEQ, s.STAGE_CAPACITY,
+              CASE
+                WHEN s.STAGE_SEQ <= p.STAGES_COMPLETE THEN 'Completed'
+                WHEN s.STAGE_SEQ = p.STAGES_COMPLETE + 1 THEN 'Pending'
+                ELSE 'Not Started'
+              END AS STAGE_STATUS,
+              DATEADD(hour, s.OFFSET_HOURS,
+                DATEADD(minute, p.PLATE_SEQ * 30, TO_TIMESTAMP_NTZ('2026-08-29 02:00:00'))) AS TS,
+              MOD(3 * p.PLATE_SEQ + s.STAGE_SEQ - 1, 23) + 1     AS OP_ORD,
+              MOD(3 * p.PLATE_SEQ + s.STAGE_SEQ - 1 + 7, 23) + 1 AS WIT_ORD
+            FROM plates p CROSS JOIN stages s
+          )
+          SELECT
+            g.PLATE_ID,
+            g.PLEX,
+            g.BATCH_ID,
+            g.LAB_SITE,
+            g.STAGE,
+            g.STAGE_SEQ,
+            g.STAGE_CAPACITY,
+            g.STAGE_STATUS,
+            IFF(g.STAGE_STATUS = 'Completed', g.TS, NULL)                          AS STAGE_TIMESTAMP,
+            IFF(g.STAGE_STATUS = 'Completed', op.FULL_NAME, NULL)                  AS OPERATOR,
+            IFF(g.STAGE_STATUS = 'Completed', SPLIT_PART(w.FULL_NAME,' ',1), NULL) AS WITNESS,
+            CASE
+              WHEN g.STAGE_STATUS <> 'Completed' THEN NULL
+              WHEN HOUR(g.TS) BETWEEN 5 AND 14 THEN 'First (5a-3p)'
+              ELSE 'Second (3p-1:30a)'
+            END AS SHIFT,
+            c.STEP_COMMENT
+          FROM grid g
+          LEFT JOIN roster op ON op.ORD = g.OP_ORD
+          LEFT JOIN roster w  ON w.ORD  = g.WIT_ORD
+          LEFT JOIN step_comments c ON c.PLATE_ID = g.PLATE_ID AND c.STAGE = g.STAGE
+        kind: sql
+      columns:
+        - id: col-plate-id
+          formula: '[Custom SQL/PLATE_ID]'
+        - id: col-plex
+          formula: '[Custom SQL/PLEX]'
+        - id: col-batch-id
+          formula: '[Custom SQL/BATCH_ID]'
+        - id: col-lab-site
+          formula: '[Custom SQL/LAB_SITE]'
+        - id: col-stage
+          formula: '[Custom SQL/STAGE]'
+        - id: col-stage-seq
+          formula: '[Custom SQL/STAGE_SEQ]'
+        - id: col-stage-capacity
+          formula: '[Custom SQL/STAGE_CAPACITY]'
+        - id: col-stage-status
+          formula: '[Custom SQL/STAGE_STATUS]'
+        - id: col-stage-timestamp
+          formula: '[Custom SQL/STAGE_TIMESTAMP]'
+        - id: col-operator
+          formula: '[Custom SQL/OPERATOR]'
+        - id: col-witness
+          formula: '[Custom SQL/WITNESS]'
+        - id: col-shift
+          formula: '[Custom SQL/SHIFT]'
+        - id: col-step-comment
+          formula: '[Custom SQL/STEP_COMMENT]'
+      name: Plate Stages
+      order:
+        - col-plate-id
+        - col-plex
+        - col-batch-id
+        - col-lab-site
+        - col-stage
+        - col-stage-seq
+        - col-stage-capacity
+        - col-stage-status
+        - col-stage-timestamp
+        - col-operator
+        - col-witness
+        - col-shift
+        - col-step-comment
+    - id: vCS32QdE4T
+      kind: pivot-table
+      source:
+        elementId: el-plate-stages
+        kind: table
+      columns:
+        - id: bnCIySI63i
+          formula: '[Plate Stages/Plate Id]'
+        - id: A_a_zhT8Gy
+          formula: '[Plate Stages/Plex]'
+        - id: WwpuraQVz_
+          formula: '[Plate Stages/Batch Id]'
+        - id: haTtgretpP
+          formula: '[Plate Stages/Stage]'
+        - id: zLAH_1E7c5
+          formula: Max([Stage Timestamp (1)])
+          name: Stage Timestamp
+        - id: g3luCwWUhA
+          formula: Max([Operator (1)])
+          name: Operator
+        - id: iovh7aGvDq
+          formula: Max([Witness (1)])
+          name: Witness
+        - id: p5Bgswkwqo
+          formula: '[Plate Stages/Lab Site]'
+        - id: ilQ8D-l17P
+          formula: '[Plate Stages/Stage Capacity]'
+        - id: jN9Qax5zgq
+          formula: '[Plate Stages/Stage Status]'
+        - id: vYvM4xbqbW
+          formula: '[Plate Stages/Stage Timestamp]'
+        - id: UgPC5M3u3w
+          formula: '[Plate Stages/Operator]'
+        - id: O_9F6h5bPJ
+          formula: '[Plate Stages/Witness]'
+        - id: yYQOEtt5wJ
+          formula: '[Plate Stages/Shift]'
+        - id: MLvL4i7fg9
+          formula: '[Plate Stages/Step Comment]'
+        - id: vRbstbLhsT
+          formula: '[Plate Stages/Stage Seq]'
+      values:
+        - zLAH_1E7c5
+        - g3luCwWUhA
+        - iovh7aGvDq
+      rowsBy:
+        - id: bnCIySI63i
+        - id: A_a_zhT8Gy
+        - id: WwpuraQVz_
+      columnsBy:
+        - id: haTtgretpP
+      name: Pivot Table
+  pages:
+    - id: page-stage-data
+      name: Stage Data
+  kind: workbook
+  layout: |
+    <?xml version="1.0" encoding="utf-8"?>
+    <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page-stage-data">
+      <Element elementId="el-plate-stages" gridColumn="1 / 25" gridRow="1 / 20"/>
+      <Element elementId="vCS32QdE4T" gridColumn="1 / 25" gridRow="20 / 40"/>
+    </Page>

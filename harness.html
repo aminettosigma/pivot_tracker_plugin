@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pivot Tracker — harness</title>
+<style>
+  body { margin:0; background:#eef0f3; color:#1f2733;
+         font:12px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  #bar { padding:8px 12px; border-bottom:1px solid #d8dce2; background:#ffffff; }
+  #bar button { margin-right:6px; background:#f4f5f7; color:#1f2733; border:1px solid #d8dce2;
+                border-radius:4px; padding:4px 9px; cursor:pointer; }
+  #host { height:calc(100vh - 40px); background:#fff; }
+  #log { position:fixed; right:0; bottom:0; width:340px; max-height:45vh; overflow:auto;
+         background:#ffffff; border-left:1px solid #d8dce2; border-top:1px solid #d8dce2;
+         padding:8px; font:10.5px/1.4 ui-monospace,Menlo,monospace; color:#1a6b32; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button data-c="base">Natera pivot</button>
+  <button data-c="debug">+ diagnostics</button>
+  <button data-c="rules">+ JSON rules</button>
+  <button data-c="nocolor">no colour column</button>
+  <button data-c="override">manual overrides</button>
+  <span id="what" style="color:#6b7684"></span>
+</div>
+<div id="host"></div>
+<div id="log"></div>
+
+<script>
+/* Reproduce the Natera pivot element's flat, column-oriented payload.
+   Mirrors the real spec: rowsBy=Plate Id, columnsBy=Stage,
+   values=Max(Stage Timestamp), Max(Operator), Max(Witness). */
+var PLATES = [
+  ['A11345','G64','AN3328','SIG-Austin',13],
+  ['A11346','X16','AN3328','SIG-Austin',13],
+  ['A11347','X16','AN3328','SIG-Austin',11],
+  ['A11348','X16','AN3329','SIG-San Carlos',9],
+  ['A11349','X16','AN3329','SIG-San Carlos',6],
+  ['A11350','X16+G64','AN3330','SIG-Austin',4]
+];
+var STAGES = ['PLATING','1ST SS','2ND SS','QUANT-IT','NORM','ER','AT','LIGATION',
+              'LIG EDTA','1ST PUR','POST PUR STAMP','LIB AMP','2ND PUR'];
+var OPS = ['Haley Cravalho','Savanna Pflug','Kedear Iyer','William Cook','Kelly Zelaya',
+           'Kolin Foster','Andrea Spiller','Andy Munoz','Robinson Dinh','Tamyah Jones'];
+
+var COLUMNS = {
+  'bnCIySI63i': { id:'bnCIySI63i', name:'Plate Id',        columnType:'text' },
+  'A_a_zhT8Gy': { id:'A_a_zhT8Gy', name:'Plex',            columnType:'text' },
+  'WwpuraQVz_': { id:'WwpuraQVz_', name:'Batch Id',        columnType:'text' },
+  'p5Bgswkwqo': { id:'p5Bgswkwqo', name:'Lab Site',        columnType:'text' },
+  'haTtgretpP': { id:'haTtgretpP', name:'Stage',           columnType:'text' },
+  'zLAH_1E7c5': { id:'zLAH_1E7c5', name:'Stage Timestamp', columnType:'datetime',
+                  format:{ type:'date', format:'%m/%d, %H:%M' } },
+  'g3luCwWUhA': { id:'g3luCwWUhA', name:'Operator',        columnType:'text' },
+  'iovh7aGvDq': { id:'iovh7aGvDq', name:'Witness',         columnType:'text' },
+  'jN9Qax5zgq': { id:'jN9Qax5zgq', name:'Stage Status',    columnType:'text' },
+  'ilQ8D-l17P': { id:'ilQ8D-l17P', name:'Stage Capacity',  columnType:'integer',
+                  format:{ type:'number', format:',d' } }
+};
+
+// Capacity is an attribute of the Stage column dimension, not of a cell.
+var CAPACITY = { 'PLATING':80,'1ST SS':80,'2ND SS':80,'QUANT-IT':72,'NORM':64,'ER':64,'AT':56,
+                 'LIGATION':50,'LIG EDTA':50,'1ST PUR':50,'POST PUR STAMP':50,'LIB AMP':50,'2ND PUR':50 };
+
+var DATA = {};
+Object.keys(COLUMNS).forEach(function (k) { DATA[k] = []; });
+PLATES.forEach(function (p, pi) {
+  STAGES.forEach(function (stage, si) {
+    var done = si < p[4];
+    var pending = si === p[4];
+    DATA['bnCIySI63i'].push(p[0]);
+    DATA['A_a_zhT8Gy'].push(p[1]);
+    DATA['WwpuraQVz_'].push(p[2]);
+    DATA['p5Bgswkwqo'].push(p[3]);
+    DATA['haTtgretpP'].push(stage);
+    DATA['ilQ8D-l17P'].push(CAPACITY[stage]);
+    DATA['jN9Qax5zgq'].push(done ? 'Completed' : (pending ? 'Pending' : 'Not Started'));
+    if (done) {
+      DATA['zLAH_1E7c5'].push(new Date(2026, 7, 29, 2 + si * 2, (pi * 30 + si * 7) % 60).toISOString());
+      DATA['g3luCwWUhA'].push(OPS[(pi * 3 + si) % OPS.length]);
+      DATA['iovh7aGvDq'].push(OPS[(pi * 3 + si + 5) % OPS.length].split(' ')[0]);
+    } else {
+      DATA['zLAH_1E7c5'].push(null);
+      DATA['g3luCwWUhA'].push(null);
+      DATA['iovh7aGvDq'].push(null);
+    }
+  });
+});
+
+var CASES = {
+  base:     { source:'pivot', colorColumn:'jN9Qax5zgq', autoPalette:true,
+              rowVariable:'v-row', columnVariable:'v-col', onCellClick:'a-click' },
+  debug:    { source:'pivot', colorColumn:'jN9Qax5zgq', autoPalette:true, debug:true,
+              rowVariable:'v-row', columnVariable:'v-col' },
+  rules:    { source:'pivot', colorColumn:'jN9Qax5zgq', autoPalette:true, debug:true,
+              colorRules:'{"default":"#f4f5f7","values":{"Completed":{"bg":"#e3edfb","fg":"#1b3f6b","border":"#bcd4f2"},"Pending":"#fbe6a8","Not Started":"#f0f1f4"}}' },
+  nocolor:  { source:'pivot', autoPalette:true, debug:true },
+  override: { source:'pivot', debug:true, colorColumn:'jN9Qax5zgq',
+              rowColumns:['bnCIySI63i','WwpuraQVz_'], pivotColumn:'haTtgretpP',
+              valueColumns:['g3luCwWUhA','zLAH_1E7c5'] }
+};
+
+function log(msg) {
+  var el = document.getElementById('log');
+  el.innerHTML += msg + '<br>';
+  el.scrollTop = el.scrollHeight;
+}
+
+/* The stub MUST mirror the real SDK's nesting (variables/actions under
+   client.config in production usage) or the harness passes while Sigma throws. */
+function makeStub(config) {
+  var subs = [];
+  return {
+    client: {
+      sigmaEnv: 'author',
+      config: {
+        configureEditorPanel: function (entries) { log('editorPanel: ' + entries.length + ' entries'); },
+        subscribe: function (cb) { subs.push(cb); cb(config); return function () {}; },
+        get: function () { return config; },
+        getKey: function (k) { return config[k]; },
+        set: function () {}, setKey: function () {}
+      },
+      elements: {
+        // The real SDK delivers these asynchronously.
+        subscribeToElementColumns: function (id, cb) { setTimeout(function () { cb(COLUMNS); }, 0); return function () {}; },
+        subscribeToElementData: function (id, cb) { setTimeout(function () { cb(DATA); }, 0); return function () {}; },
+        getElementColumns: function () { return Promise.resolve(COLUMNS); }
+      },
+      setVariable: function (id, v) { log('setVariable(' + id + ') = ' + JSON.stringify(v)); },
+      getVariable: function () { return undefined; },
+      subscribeToWorkbookVariable: function () { return function () {}; },
+      triggerAction: function (id) { log('triggerAction(' + id + ')'); },
+      registerEffect: function () {},
+      setLoadingState: function () {},
+      style: { get: function () { return Promise.resolve({}); }, subscribe: function () {} }
+    }
+  };
+}
+
+function load(caseName) {
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('what').textContent = '— ' + caseName;
+  log('case: ' + caseName + ' (' + DATA['bnCIySI63i'].length + ' source rows)');
+
+  var host = document.getElementById('host');
+  host.innerHTML = '';
+  var iframe = document.createElement('iframe');
+  iframe.style.cssText = 'width:100%;height:100%;border:0';
+  host.appendChild(iframe);
+
+  fetch('index.html').then(function (r) { return r.text(); }).then(function (html) {
+    // Strip the vendored SDK/React tags; the stub replaces them.
+    html = html.replace(/<script src="vendor\/[^"]*"><\/script>/g, '');
+    var doc = iframe.contentDocument;
+    iframe.contentWindow.__stub = makeStub(CASES[caseName]);
+    iframe.contentWindow.__log = log;
+    doc.open();
+    doc.write(html.replace('<div id="root"></div>',
+      '<div id="root"></div><script>window.SigmaPlugin = window.__stub;' +
+      'window.onerror=function(m){window.parent.document.getElementById("log").innerHTML+=' +
+      '"<span style=color:#b4342a>ERROR: "+m+"</span><br>";};<\/script>'));
+    doc.close();
+  });
+}
+
+Array.prototype.forEach.call(document.querySelectorAll('#bar button'), function (b) {
+  b.addEventListener('click', function () { load(b.getAttribute('data-c')); });
+});
+load('base');
+</script>
+</body>
+</html>
