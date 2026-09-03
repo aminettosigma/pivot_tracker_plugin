@@ -144,13 +144,14 @@
 
   function handleCellClick(rowValue, pivotValue, rowColId, pivotColId) {
     var cfg = state.config;
+    // Variables and action triggers live on client.config, not on the client root.
     if (cfg.rowVariable) {
-      client.setVariable(cfg.rowVariable, typedValue(rowValue, rowColId));
+      client.config.setVariable(cfg.rowVariable, typedValue(rowValue, rowColId));
     }
     if (cfg.columnVariable) {
-      client.setVariable(cfg.columnVariable, typedValue(pivotValue, pivotColId));
+      client.config.setVariable(cfg.columnVariable, typedValue(pivotValue, pivotColId));
     }
-    if (cfg.onCellClick) client.triggerAction(cfg.onCellClick);
+    if (cfg.onCellClick) client.config.triggerAction(cfg.onCellClick);
     state.selected = window.PivotDetect.key(rowValue) + '\u0001' + window.PivotDetect.key(pivotValue);
     render();
   }

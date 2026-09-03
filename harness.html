@@ -119,7 +119,19 @@ function makeStub(config) {
         subscribe: function (cb) { subs.push(cb); cb(config); return function () {}; },
         get: function () { return config; },
         getKey: function (k) { return config[k]; },
-        set: function () {}, setKey: function () {}
+        set: function () {}, setKey: function () {},
+        // Variables and action triggers hang off config in the real SDK -- keep
+        // them here only, so calling them on the client root fails loudly.
+        setVariable: function (id) {
+          var vals = Array.prototype.slice.call(arguments, 1);
+          log('config.setVariable(' + id + ') = ' + vals.map(function (v) {
+            return JSON.stringify(v) + ' [' + typeof v + ']';
+          }).join(', '));
+        },
+        getVariable: function () { return undefined; },
+        subscribeToWorkbookVariable: function () { return function () {}; },
+        triggerAction: function (id) { log('config.triggerAction(' + id + ')'); },
+        setInteraction: function () {}, getInteraction: function () { return undefined; }
       },
       elements: {
         // The real SDK delivers these asynchronously.
@@ -127,10 +139,6 @@ function makeStub(config) {
         subscribeToElementData: function (id, cb) { setTimeout(function () { cb(DATA); }, 0); return function () {}; },
         getElementColumns: function () { return Promise.resolve(COLUMNS); }
       },
-      setVariable: function (id, v) { log('setVariable(' + id + ') = ' + JSON.stringify(v)); },
-      getVariable: function () { return undefined; },
-      subscribeToWorkbookVariable: function () { return function () {}; },
-      triggerAction: function (id) { log('triggerAction(' + id + ')'); },
       registerEffect: function () {},
       setLoadingState: function () {},
       style: { get: function () { return Promise.resolve({}); }, subscribe: function () {} }
