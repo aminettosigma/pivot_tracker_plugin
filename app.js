@@ -16,6 +16,12 @@
   client.config.configureEditorPanel([
     { name: 'source', type: 'element' },
 
+    // Sigma only streams data for columns the plugin explicitly requests, so at
+    // least one column entry is required. Roles are still detected automatically.
+    { name: 'dataColumns', type: 'column', source: 'source', allowMultiple: true,
+      label: 'Columns',
+      description: 'Add every column the pivot uses: row dimensions, the pivot column, the cell values, and the colour column. Their roles are detected automatically.' },
+
     { name: 'rowColumns', type: 'column', source: 'source', allowMultiple: true,
       label: 'Left columns (optional override)',
       description: 'Leave empty to auto-detect from the pivot row dimensions. The first column is the one passed to the row control.' },
@@ -111,9 +117,41 @@
   function render() {
     var cfg = state.config;
     if (!cfg.source) return message('Select a pivot table as the data source in the editor panel.');
-    if (!state.data || !state.columns) return message('Loading pivot data\u2026');
 
-    var layout = window.PivotDetect.detect(state.data, state.columns, {
+    var requested = asArray(cfg.dataColumns);
+    if (!requested.length) {
+      return message('Add the pivot\'s columns under "Columns" in the editor panel — ' +
+        'row dimensions, the pivot column, the cell values and the colour column. ' +
+        'Their roles are detected automatically.');
+    }
+
+    if (!state.columns) return message('Waiting for column metadata from Sigma…');
+    if (!state.data) return message('Waiting for row data from Sigma…');
+
+    var populated = Object.keys(state.data).filter(function (k) {
+      return Array.isArray(state.data[k]);
+    });
+    if (!populated.length) {
+      return message('Sigma returned no column data for this element. ' +
+        'Requested ' + requested.length + ' column(s); received ' +
+        Object.keys(state.data).length + ' key(s).', 'error');
+    }
+
+    if (cfg.colorColumn && requested.indexOf(cfg.colorColumn) === -1) {
+      return message('The colour column "' + colName(cfg.colorColumn) + '" must also be ' +
+        'added under "Columns" so Sigma sends its data.', 'error');
+    }
+
+    // Scope detection to the requested columns, preserving the editor's order.
+    var scopedData = {}, scopedCols = {};
+    requested.forEach(function (id) {
+      if (Array.isArray(state.data[id])) {
+        scopedData[id] = state.data[id];
+        scopedCols[id] = state.columns[id] || { id: id, name: id, columnType: 'text' };
+      }
+    });
+
+    var layout = window.PivotDetect.detect(scopedData, scopedCols, {
       rowColumns: asArray(cfg.rowColumns),
       pivotColumn: cfg.pivotColumn,
       valueColumns: asArray(cfg.valueColumns),
@@ -251,6 +289,8 @@
         colorColumn: cfg.colorColumn ? colName(cfg.colorColumn) : null,
         colorDomain: domain,
         colorRulesError: compiled.error,
+        requestedColumns: requested.length,
+        populatedColumns: populated.length,
         formats: Object.keys(state.columns).reduce(function (acc, id) {
           acc[state.columns[id].name] = {
             type: state.columns[id].columnType, format: state.columns[id].format || null
