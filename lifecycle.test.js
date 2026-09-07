@@ -50,6 +50,31 @@ root.querySelector = function (sel) {
   if (sel === 'table.pivot tbody') return tbody;
   return null;                                   // no '.pill.sel' before a click
 };
+/* Enough DOM for the color picker: it creates a popover, appends it to root, then
+   reads its own '.hex' input back. Selector lookups inside the popover return the
+   same stub each time so a test can set a value and then fire Apply. */
+root.children = [];
+root.appendChild = function (el) { root.children.push(el); el.parentNode = root; return el; };
+root.removeChild = function (el) {
+  root.children = root.children.filter(function (c) { return c !== el; });
+  el.parentNode = null;
+};
+root.getBoundingClientRect = function () { return { top: 0, left: 0, width: 900, height: 600 }; };
+
+function createElement(tag) {
+  var el = node(tag);
+  var stubs = {};
+  el.querySelector = function (sel) {
+    if (!stubs[sel]) {
+      var s = node('input');
+      s.value = '';
+      s.focus = function () {};
+      stubs[sel] = s;
+    }
+    return stubs[sel];
+  };
+  return el;
+}
 
 var sandbox = {
   console: console, setTimeout: setTimeout,
@@ -61,6 +86,7 @@ sandbox.global = sandbox;
 sandbox.document = {
   body: node('body'),
   getElementById: function () { return root; },
+  createElement: createElement,
   addEventListener: function () {}
 };
 sandbox.addEventListener = function () {};
@@ -78,6 +104,7 @@ sandbox.SigmaPlugin = {
       configureEditorPanel: function () {},
       subscribe: function (fn) { emit = fn; return function () {}; },
       get: function () { return live; },
+      setKey: function (k, v) { writes.push([k, v]); },
       setLoadingState: function (on) { loadingStates.push(on); },
       setVariable: function (id) {
         vars.push([id, Array.prototype.slice.call(arguments, 1)[0]]);
@@ -108,7 +135,16 @@ sandbox.SigmaPlugin = {
   }
 };
 var vars = [], actions = [];
+var writes = [];
 var pages = [], pager = null, fetchMores = 0, loadingStates = [];
+
+/* Settings edits reach a real plugin through subscribe(), not through
+   config.get(). Drive them that way so the suite exercises the same path the
+   workbook does; the snapshot is kept in step, as the host does on re-mount. */
+function setConfig(patch) {
+  live = Object.assign({}, live, patch);
+  emit(live);
+}
 
 ['format.js', 'pivot.js', 'colors.js', 'styles.js', 'app.js'].forEach(function (f) {
   vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), sandbox);
@@ -138,6 +174,23 @@ sandbox.__tick();
 check('poll subscribed to the element', subs, ['cols', 'data']);
 check('grid painted without a refresh', countPills(tbody.innerHTML) > 0, true);
 
+console.log('\n--- a subscribe emission must survive the watchdog poll ---');
+/* The real host's config.get() returns a snapshot of the last message it sent.
+   Saving a text field reaches subscribe() but does not always refresh that
+   snapshot -- a column picker change does, because it re-mounts the iframe. So
+   the poll must never revert what subscribe just delivered. Modeled by holding
+   live (= get()) frozen while emitting a newer config. */
+var fresh = Object.assign({}, live, {
+  colorRules: '{"Completed":"#A36E1F"}', darkMode: false, autoPalette: true
+});
+emit(fresh);
+check('the emitted rule color is painted', /#A36E1F/i.test(tbody.innerHTML), true);
+sandbox.__tick();
+sandbox.__tick();
+sandbox.__tick();
+check('still painted after three polls', /#A36E1F/i.test(tbody.innerHTML), true);
+check('the poll did not revert to the palette', /#e3edfb/i.test(tbody.innerHTML), false);
+
 console.log('\n--- virtualization windowing ---');
 // 18 fixture plates, 600px viewport. Every row must be exactly one row-height.
 var firstWindow = tbody.innerHTML;
@@ -164,8 +217,7 @@ var big = { plates: 400 };
 
 emit(Object.assign({}, live, { __force: 1 }));   // keep config, new data below
 pages = onePage(sandbox.__big);
-live = Object.assign({}, live, { valueColumns: [ID.ts, ID.op, ID.wit] });
-sandbox.__tick();
+setConfig({ valueColumns: [ID.ts, ID.op, ID.wit] });
 
 var win = tbody.innerHTML;
 var winRows = countPills(win) / pillsPerRow;
@@ -205,8 +257,7 @@ wrap.fire('click', { target: target });
 check('one listener serves every pill', (wrap.listeners.click || []).length, 1);
 check('click set both controls', vars.length, 0);  // no variables configured yet
 
-live = Object.assign({}, live, { rowVariable: 'Plate-Id', columnVariable: 'Stage' });
-sandbox.__tick();
+setConfig({ rowVariable: 'Plate-Id', columnVariable: 'Stage' });
 wrap.scrollTop = 0; wrap.fire('scroll', {});
 m = /data-row="([^"]*)" data-col="([^"]*)"/.exec(tbody.innerHTML);
 vars = [];
@@ -224,8 +275,7 @@ PD.detect = function () { detectCalls++; return realDetect.apply(null, arguments
 PD.build = function () { buildCalls++; return realBuild.apply(null, arguments); };
 
 var painted = tbody.innerHTML;
-live = Object.assign({}, live, { darkMode: true, compact: true });
-sandbox.__tick();
+setConfig({ darkMode: true, compact: true });
 check('repainted for cosmetic change', tbody.innerHTML !== painted, true);
 check('cosmetic change did not re-detect', detectCalls, 0);
 check('cosmetic change did not rebuild the grid', buildCalls, 0);
@@ -236,8 +286,7 @@ wrap.fire('click', { target: target });
 check('clicking did not re-detect', detectCalls, 0);
 wrap.scrollTop = 0; wrap.fire('scroll', {});
 
-live = Object.assign({}, live, { valueColumns: [ID.ts, ID.op] });
-sandbox.__tick();
+setConfig({ valueColumns: [ID.ts, ID.op] });
 // A structural change also re-subscribes, so the redelivered page detects again;
 // what matters is that it detected at all, versus zero for cosmetic changes.
 check('structural change does re-detect', detectCalls >= 1, true);
@@ -247,51 +296,173 @@ console.log('\n--- field-name row under the headers ---');
 // Two value columns are in scope from the structural change above, so the row
 // would render if it were enabled -- proving the assertion is not vacuous.
 check('hidden by default', /grp-sub/.test(root.innerHTML), false);
-live = Object.assign({}, live, { showValueLabels: true });
-sandbox.__tick();
+setConfig({ showValueLabels: true });
 check('shown when the toggle is on', /grp-sub/.test(root.innerHTML), true);
 check('names its value columns', /OPERATOR|Operator/.test(root.innerHTML), true);
-live = Object.assign({}, live, { showValueLabels: false });
-sandbox.__tick();
+setConfig({ showValueLabels: false });
 check('hidden again when turned off', /grp-sub/.test(root.innerHTML), false);
 
 console.log('\n--- custom color rules must beat the auto palette ---');
 // Mirrors the reported shape: mixed case, spaces and parentheses in the key, and
 // the auto-palette toggle left on. Light theme is forced, because the assertions
 // name a light-palette color and would pass vacuously under the dark palette.
-live = Object.assign({}, live, {
+setConfig({
   darkMode: false,
   autoPalette: true,
   colorRules: '{"Completed":"#A36E1F","Pending (late)":"#376692"}'
 });
-sandbox.__tick();
 check('the rule color is in the painted HTML', /#A36E1F/i.test(tbody.innerHTML), true);
 check('the auto palette is not used for a matched value',
   /#e3edfb/i.test(tbody.innerHTML), false);
-live = Object.assign({}, live, { colorRules: '' });
-sandbox.__tick();
+setConfig({ colorRules: '' });
 check('clearing the rules falls back to the palette',
   /#e3edfb/i.test(tbody.innerHTML), true);
 check('and the rule color is gone', /#A36E1F/i.test(tbody.innerHTML), false);
 
 // Debug reports rule coverage, so an unsaved rules box is diagnosable.
-live = Object.assign({}, live, { debug: true });
-sandbox.__tick();
+setConfig({ debug: true });
 check('no rules reported when the box is empty', diag('colorRuleKeys'), 0);
-live = Object.assign({}, live, { colorRules: '{"Completed":"#A36E1F"}' });
-sandbox.__tick();
+setConfig({ colorRules: '{"Completed":"#A36E1F"}' });
 check('rule count reported', diag('colorRuleKeys'), 1);
 check('values the rules miss are listed',
   diagArray('unmatchedByRules'), ['Not Started', 'Pending']);
-live = Object.assign({}, live, { debug: false, colorRules: '' });
-sandbox.__tick();
+setConfig({ debug: false, colorRules: '' });
+
+console.log('\n--- inline field names in the pill ---');
+setConfig({ inlineLabels: false, valueColumns: [ID.op, ID.wit] });
+var bare = tbody.innerHTML;
+check('off by default', /class="ilbl"/.test(bare), false);
+function cellWidthPx() {
+  // The cell columns are the trailing <col>s; the left columns come first.
+  var all = (root.innerHTML.match(/<col style="width:(\d+)px">/g) || [])
+    .map(function (m) { return Number(/(\d+)/.exec(m)[1]); });
+  return all[all.length - 1];
+}
+var bareWidth = cellWidthPx();
+
+setConfig({ inlineLabels: true });
+check('the field name is rendered', /class="ilbl"/.test(tbody.innerHTML), true);
+check('formatted as "Name: value"',
+  /class="ilbl"[^>]*>Operator:<\/span> /.test(tbody.innerHTML), true);
+check('one label per value column',
+  (tbody.innerHTML.match(/class="ilbl"/g) || []).length,
+  (bare.match(/class="line l/g) || []).length);
+// Labels make every line longer; if the column were not widened the text would
+// wrap and rows would stop being exactly rowH tall, which breaks virtualization.
+check('cells are widened to fit the labels', cellWidthPx() > bareWidth, true);
+check('values are still present', /Haley Cravalho|William Cook/.test(tbody.innerHTML), true);
+
+setConfig({ inlineLabels: false, valueColumns: [ID.ts, ID.op] });
+check('turning it off removes them', /class="ilbl"/.test(tbody.innerHTML), false);
+
+console.log('\n--- legend ---');
+setConfig({ colorRules: '', autoPalette: true, darkMode: false, debug: false });
+function swatches(html) {
+  return (html.match(/<span class="sw" style="background:([^;]+);/g) || [])
+    .map(function (s) { return /background:([^;]+);/.exec(s)[1]; });
+}
+function chips(html) {
+  return (html.match(/data-lgv="([^"]*)"/g) || [])
+    .map(function (s) { return /data-lgv="([^"]*)"/.exec(s)[1]; });
+}
+check('one chip per distinct color value', chips(root.innerHTML),
+  ['Completed', 'Not Started', 'Pending']);
+check('the color column is named', /class="lgt">Stage Status</.test(root.innerHTML), true);
+// The legend must show the same colors the cells do, or it lies to the reader.
+var legendFirst = swatches(root.innerHTML)[0];
+check('swatch matches the palette color used in the grid',
+  tbody.innerHTML.indexOf(legendFirst) !== -1, true);
+
+setConfig({ colorRules: '{"Completed":"#a36e1f"}' });
+check('swatch follows a rule color', swatches(root.innerHTML)[0], '#a36e1f');
+check('and so does the grid', /#a36e1f/i.test(tbody.innerHTML), true);
+
+console.log('\n--- color picker ---');
+function fire(sel, attrs) {
+  var stub = node('button');
+  stub.getAttribute = function (a) { return (attrs || {})[a]; };
+  root.fire('click', { target: { closest: function (s) { return s === sel ? stub : null; } } });
+  return stub;
+}
+writes = [];
+fire('.lg', { 'data-lgv': 'Pending' });
+check('clicking a chip opens the picker', root.children.length, 1);
+check('presets are offered', (root.children[0].innerHTML.match(/class="opt/g) || []).length > 6, true);
+check('the picker names the value', /Color for <b>Pending<\/b>/.test(root.children[0].innerHTML), true);
+
+fire('.opt', { 'data-hex': '#123456' });
+check('picking a preset saves it', writes.length, 1);
+check('saved under the config key', writes[0][0], 'colorRules');
+check('existing colors are kept', JSON.parse(writes[0][1]),
+  { Completed: '#a36e1f', Pending: '#123456' });
+check('the picker closes', root.children.length, 0);
+check('the grid repaints with it', /#123456/i.test(tbody.innerHTML), true);
+
+// A hex typed by hand, including the shorthand and a missing '#'.
+writes = [];
+var pick = fire('.lg', { 'data-lgv': 'Not Started' });
+root.children[0].querySelector('.hex').value = 'abc';
+fire('.act', {});
+check('shorthand hex expands', JSON.parse(writes[0][1])['Not Started'], '#aabbcc');
+
+writes = [];
+fire('.lg', { 'data-lgv': 'Not Started' });
+var input = root.children[0].querySelector('.hex');
+input.value = 'nope';
+fire('.act', {});
+check('invalid hex is not saved', writes.length, 0);
+check('the input is flagged instead', input.classList.contains('bad'), true);
+check('and the picker stays open', root.children.length, 1);
+
+writes = [];
+fire('.reset', {});
+check('reset removes just that override', JSON.parse(writes[0][1]),
+  { Completed: '#a36e1f', Pending: '#123456' });
+
+console.log('\n--- picked colors survive the watchdog poll ---');
+// The same clobber that lost saved text would lose a picked color, because
+// config.get() has not caught up with our own write yet.
+sandbox.__tick(); sandbox.__tick();
+check('still painted after polling', /#123456/i.test(tbody.innerHTML), true);
+
+console.log('\n--- advanced rules are not destroyed by the picker ---');
+setConfig({ colorRules: '{"default":"#eeeeee","values":{"Completed":"#111111"},' +
+  '"rules":[{"op":">=","value":10,"color":"#222222"}],"isnull":"#333333"}' });
+writes = [];
+fire('.lg', { 'data-lgv': 'Pending' });
+fire('.opt', { 'data-hex': '#456789' });
+var kept = JSON.parse(writes[0][1]);
+check('numeric rules kept', kept.rules, [{ op: '>=', value: 10, color: '#222222' }]);
+check('default kept', kept['default'], '#eeeeee');
+check('presence test kept', kept.isnull, '#333333');
+check('new color lands in values', kept.values,
+  { Completed: '#111111', Pending: '#456789' });
+
+console.log('\n--- blank values ---');
+// Blanks are a real state on a Comments column, so they get a chip, and it is
+// stored as the isnull presence test rather than as a literal empty string.
+setConfig({ colorRules: '', colorColumn: ID.wit });
+var blankChips = chips(root.innerHTML).filter(function (c) { return c === '\u0000blank'; });
+check('a No value chip appears when blanks exist', blankChips.length, 1);
+check('labelled for a business reader', /class="lgn">No value</.test(root.innerHTML), true);
+writes = [];
+fire('.lg', { 'data-lgv': '\u0000blank' });
+fire('.opt', { 'data-hex': '#654321' });
+check('stored as isnull', JSON.parse(writes[0][1]).isnull, '#654321');
+setConfig({ colorColumn: ID.status, colorRules: '' });
+
+console.log('\n--- legend overflow ---');
+// A mis-picked color column must not emit hundreds of swatches.
+setConfig({ colorColumn: ID.ts, colorRules: '' });
+var valueChips = chips(root.innerHTML).filter(function (c) { return c !== '\u0000blank'; });
+check('value chips are capped at the limit', valueChips.length, 24);
+check('the remainder is reported', /\+\d+ more/.test(root.innerHTML), true);
+setConfig({ colorColumn: ID.status, colorRules: '' });
 
 console.log('\n--- max rows cap ---');
-live = Object.assign({}, live, { maxRows: '25', darkMode: false, compact: false });
-sandbox.__tick();
+setConfig({ maxRows: '25', darkMode: false, compact: false });
 check('note reports the truncation', /Showing the first 25 of 400 rows/.test(root.innerHTML), true);
-live = Object.assign({}, live, { maxRows: '0' });
-sandbox.__tick();
+setConfig({ maxRows: '0' });
 check('0 means unlimited (no note)', /Showing the first/.test(root.innerHTML), false);
 
 console.log('\n--- paginated loading (Sigma sends data in pages) ---');
@@ -310,8 +481,7 @@ pages = [
   { data: slice(cut * 2, totalLen), offset: cut * 2, isComplete: true, totalRows: totalLen }
 ];
 fetchMores = 0; loadingStates = []; pager = null;
-live = Object.assign({}, live, { source: 'el-paged', maxRows: '0', debug: true });
-sandbox.__tick();
+setConfig({ source: 'el-paged', maxRows: '0', debug: true });
 
 // The debug JSON is HTML-escaped, so quotes appear as &quot;.
 function diag(field) {
@@ -338,8 +508,7 @@ pages = [
   { data: slice(cut, totalLen), offset: cut, isComplete: true, totalRows: totalLen }
 ];
 fetchMores = 0; pager = null;
-live = Object.assign({}, live, { source: 'el-resend', debug: true });
-sandbox.__tick();
+setConfig({ source: 'el-resend', debug: true });
 check('rewind on repeated offset, no duplicates', diag('rowsLoaded'), totalLen);
 
 console.log('\n--- host that never completes must not loop forever ---');
@@ -349,8 +518,7 @@ pages = [
   { data: { }, offset: cut, isComplete: false, totalRows: totalLen }
 ];
 fetchMores = 0; pager = null;
-live = Object.assign({}, live, { source: 'el-stalled', debug: true });
-sandbox.__tick();
+setConfig({ source: 'el-stalled', debug: true });
 check('stopped fetching after no progress', fetchMores <= 3, true);
 check('gave up and marked complete', diag('loadComplete'), true);
 

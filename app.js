@@ -43,10 +43,15 @@
 
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
       label: 'Color by column (optional)' },
+    /* Colors are set by clicking a swatch in the legend, not here. This entry
+       stays declared because it is the slot the picker writes into -- an
+       undeclared config key is not guaranteed to persist -- and because it keeps
+       the advanced forms available: numeric thresholds and presence tests, which
+       a swatch picker cannot express. Normally you never open it. */
     { name: 'colorRules', type: 'text', multiline: true,
-      label: 'Color rules JSON (optional)',
+      label: 'Colors (managed by the legend \u2014 advanced)',
       placeholder: '{"isnotnull":"#1d3a5c","isnull":"#f4f5f7"}',
-      description: 'Overrides the auto palette. Flat value:color map, or {"default":..,"values":{..},"rules":[{"op":">=","value":10,"color":"#..."}]}. Presence tests: "isnull" (also null/empty/blank) and "isnotnull" (also notempty/filled) color cells by whether the column has a value -- e.g. {"isnotnull":"#1d3a5c","isnull":"#f4f5f7"} on a Comments column. Whitespace-only text counts as empty.' },
+      description: 'Click a swatch in the legend under the grid to change a color. This box holds what the legend saves, and accepts forms the legend cannot: {"default":..,"values":{..},"rules":[{"op":">=","value":10,"color":"#..."}]}, plus the presence tests "isnull" and "isnotnull" for coloring by whether a column has a value at all. Editing it by hand still works and the legend will show the result.' },
     { name: 'autoPalette', type: 'toggle', label: 'Auto palette for unmatched values',
       defaultValue: true },
 
@@ -70,6 +75,8 @@
       placeholder: '5000',
       description: 'Safety cap on the number of pivot rows built, so a mis-picked left column cannot wedge the browser. Rows are virtualized, so a high value is fine. Blank uses 5000; 0 means unlimited.' },
 
+    { name: 'inlineLabels', type: 'toggle',
+      label: 'Prefix each cell value with its field name', defaultValue: false },
     { name: 'showValueLabels', type: 'toggle',
       label: 'Show a field-name row under each column header', defaultValue: false },
     { name: 'compact', type: 'toggle', label: 'Compact rows' },
@@ -82,6 +89,8 @@
   var state = { config: {}, data: null, columns: null, selected: null,
     loaded: 0, totalRows: null, complete: false, dataVersion: 0 };
   var unsubData = null, unsubCols = null, boundKey = null, boundElement = null, lastConfigJson = null;
+  // Config the host has actually emitted, and the keys it has ever mentioned.
+  var emitted = {}, emittedKeys = Object.create(null);
 
   // Cached pivot resolution and the paint context for the current view. `memo`
   // keeps detect()/build() from re-running for presentational changes; `view`
@@ -268,16 +277,37 @@
     render();
   }
 
-  client.config.subscribe(applyConfig);
+  client.config.subscribe(function (config) {
+    config = config || {};
+    // Remember which keys the host has emitted, so the poll below can never
+    // overwrite one of them with a stale snapshot.
+    Object.keys(config).forEach(function (k) { emittedKeys[k] = true; });
+    emitted = config;
+    applyConfig(config);
+  });
 
   /* The host emits config once when the init handshake resolves and again on every
      edit. If the iframe is re-mounted (which Sigma does when settings change) an
      emission can land before this subscription exists, leaving the plugin parked
      on its placeholder until the workbook is refreshed. Polling the live config
-     object recovers from any dropped emission; applyConfig() de-dupes, so a
-     steady state costs one small JSON.stringify per tick. */
+     recovers from any dropped emission; applyConfig() de-dupes, so a steady state
+     costs one small JSON.stringify per tick.
+
+     But config.get() returns a snapshot of the last *message* the host sent, and
+     saving a text field reaches subscribe() without always refreshing it -- a
+     column picker change does refresh it, because that re-mounts the iframe.
+     Re-applying the raw snapshot therefore reverted saved text within 400 ms,
+     which is why the color rules JSON appeared to do nothing. Anything the host
+     has emitted wins; the snapshot only fills in keys we have never been told
+     about, which is what preserves the dropped-emission recovery. */
   setInterval(function () {
-    try { applyConfig(client.config.get()); } catch (e) { /* host not ready yet */ }
+    var snapshot;
+    try { snapshot = client.config.get(); } catch (e) { return; }   // host not ready
+    if (!snapshot) return;
+    var merged = {}, k;
+    for (k in snapshot) if (!emittedKeys[k]) merged[k] = snapshot[k];
+    for (k in emitted) merged[k] = emitted[k];
+    applyConfig(merged);
   }, 400);
 
   // --- which column supplies each passed value ------------------------------
@@ -382,10 +412,16 @@
     return widths;
   }
 
-  function measureCells(grid, layout, compact) {
+  function measureCells(grid, layout, compact, inlineLabels) {
     var data = grid.data || {};
     var chars = 0;
     var n = Math.min(grid.rows.length, SAMPLE);
+    // A "Operator: " prefix widens every line, and a cell that is too narrow wraps
+    // -- which breaks virtualization, since it assumes every row is exactly rowH.
+    var pad = Object.create(null);
+    layout.valueColumns.forEach(function (vid) {
+      pad[vid] = inlineLabels ? String(colName(vid)).length + 2 : 0;
+    });
     for (var i = 0; i < n; i++) {
       var cells = grid.rows[i].cells;
       for (var c = 0; c < grid.pivotKeys.length; c++) {
@@ -394,7 +430,7 @@
         for (var v = 0; v < layout.valueColumns.length; v++) {
           var vid = layout.valueColumns[v];
           var t = fmt((data[vid] || [])[ri], vid);
-          if (t && t.length > chars) chars = t.length;
+          if (t && t.length + pad[vid] > chars) chars = t.length + pad[vid];
         }
       }
     }
@@ -403,7 +439,8 @@
       var h = String(fmt(pk.value, layout.pivotColumn) || '').length + 6;
       if (h > chars) chars = h;
     });
-    return clamp(textWidth(chars, 6.9) + (compact ? 18 : 24), compact ? 92 : 104, 260);
+    return clamp(textWidth(chars, 6.9) + (compact ? 18 : 24), compact ? 92 : 104,
+      inlineLabels ? 400 : 260);
   }
 
   function rowHeight(lineCount, compact) {
@@ -532,6 +569,198 @@
     return memo;
   }
 
+  /* The legend is per distinct value, not per cell, so it costs nothing on a big
+     grid. Colors come from the same resolve() the pills use, so it can never
+     disagree with what is on screen. */
+  var LEGEND_LIMIT = 24;
+  var BLANK_TOKEN = '\u0000blank';
+
+  function legendHtml(cfg, compiled, domain, hasBlank) {
+    if (!cfg.colorColumn || (!domain.length && !hasBlank)) return '';
+    var autoPalette = cfg.autoPalette !== false;
+    var out = ['<div class="legend"><span class="lgt">' +
+      esc(colName(cfg.colorColumn)) + '</span>'];
+
+    function item(value, label, token) {
+      var st = window.PivotColors.resolve(value, compiled, autoPalette, domain);
+      return '<button type="button" class="lg" data-lgv="' + esc(token) + '"' +
+        ' title="Click to change this color">' +
+        '<span class="sw" style="background:' + esc(st.bg) +
+        ';border-color:' + esc(st.border) + '"></span>' +
+        '<span class="lgn">' + esc(label) + '</span></button>';
+    }
+
+    domain.slice(0, LEGEND_LIMIT).forEach(function (v) { out.push(item(v, v, v)); });
+    // Blank is a real state worth a swatch -- "has no comment" is the whole point
+    // of the isnull rule -- so it gets an entry whenever blanks exist.
+    if (hasBlank) out.push(item(null, 'No value', BLANK_TOKEN));
+    if (domain.length > LEGEND_LIMIT) {
+      out.push('<span class="lgmore">+' + (domain.length - LEGEND_LIMIT) +
+        ' more</span>');
+    }
+    out.push('</div>');
+    return out.join('');
+  }
+
+  /* ---- color picker -------------------------------------------------------
+     Clicking a legend swatch edits the color for that value. The choice is
+     written back into the plugin's own config through config.setKey, so it is
+     stored in the workbook like any other setting and survives publish. */
+  var COLOR_KEY = 'colorRules';
+  var PICK_PRESETS = [
+    '#e3edfb', '#dff2e9', '#fdf1d4', '#fce6df', '#f3e6f7', '#eef0f3',
+    '#2d6cdf', '#1e8e5a', '#d9a018', '#c4462f', '#7a4bab', '#5a6472',
+    '#1b3f6b', '#14543c', '#6b4e0d', '#71301d', '#4a2358', '#2f3742'
+  ];
+  var pickerEl = null, pickerToken = null;
+
+  function closePicker() {
+    if (pickerEl && pickerEl.parentNode) pickerEl.parentNode.removeChild(pickerEl);
+    pickerEl = null;
+    pickerToken = null;
+  }
+
+  function normalizeHex(text) {
+    var t = String(text == null ? '' : text).trim().replace(/^#/, '');
+    if (/^[0-9a-f]{3}$/i.test(t)) {
+      t = t[0] + t[0] + t[1] + t[1] + t[2] + t[2];   // #abc is legal CSS
+    }
+    return /^[0-9a-f]{6}$/i.test(t) ? '#' + t.toLowerCase() : null;
+  }
+
+  /* Rewrites one entry of the stored rules without disturbing the rest. An
+     envelope ({default, values, rules}) keeps its shape, so the numeric rules and
+     presence tests the JSON field supports are not destroyed by using the picker.
+     A null color removes the override, returning that value to the palette. */
+  function withOverride(json, token, color) {
+    var parsed = null;
+    if (json && String(json).trim()) {
+      try { parsed = JSON.parse(json); } catch (e) { parsed = null; }
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {};
+    // Blanks are stored as the presence test that already means "no value".
+    var key = token === BLANK_TOKEN ? 'isnull' : token;
+    var isEnvelope = parsed.values || parsed.rules || parsed['default'];
+    var target = parsed;
+    if (isEnvelope && token !== BLANK_TOKEN) {
+      if (!parsed.values || typeof parsed.values !== 'object') parsed.values = {};
+      target = parsed.values;
+    }
+    if (color === null) delete target[key];
+    else target[key] = color;
+    var empty = !Object.keys(parsed).length ||
+      (isEnvelope && !Object.keys(parsed.values || {}).length &&
+        !(parsed.rules || []).length && !parsed['default'] &&
+        !parsed.isnull && !parsed.isnotnull);
+    return empty ? '' : JSON.stringify(parsed);
+  }
+
+  function setColor(token, color) {
+    var next = withOverride(state.config[COLOR_KEY], token, color);
+    /* Treat our own write as a host emission. Without this the 400 ms poll would
+       read a config snapshot that predates it and revert the color -- the same
+       way saved text used to be lost. */
+    emittedKeys[COLOR_KEY] = true;
+    emitted[COLOR_KEY] = next;
+    var merged = {}, k;
+    for (k in state.config) merged[k] = state.config[k];
+    merged[COLOR_KEY] = next;
+    closePicker();
+    applyConfig(merged);
+    try {
+      if (typeof client.config.setKey === 'function') client.config.setKey(COLOR_KEY, next);
+      else if (typeof client.config.set === 'function') {
+        var patch = {}; patch[COLOR_KEY] = next; client.config.set(patch);
+      } else {
+        colorWriteError = 'This Sigma version cannot store the color from here.';
+      }
+    } catch (e) {
+      // A viewer without edit rights cannot write config; the color still applies
+      // for this session, so say so rather than failing silently.
+      colorWriteError = 'Color changed for this session only (no permission to save it).';
+    }
+  }
+  var colorWriteError = null;
+
+  function openPicker(anchor, token) {
+    if (pickerToken === token) { closePicker(); return; }
+    closePicker();
+    pickerToken = token;
+
+    var current = null;
+    var swatch = anchor.querySelector ? anchor.querySelector('.sw') : null;
+    if (swatch && swatch.style) current = normalizeHex(rgbToHex(swatch.style.background));
+
+    var label = token === BLANK_TOKEN ? 'No value' : token;
+    var opts = PICK_PRESETS.map(function (hex) {
+      return '<button type="button" class="opt' + (hex === current ? ' on' : '') +
+        '" data-hex="' + esc(hex) + '" style="background:' + esc(hex) +
+        '" title="' + esc(hex) + '"></button>';
+    }).join('');
+
+    var el = document.createElement('div');
+    el.className = 'pick';
+    el.innerHTML = '<div class="pt">Color for <b>' + esc(label) + '</b></div>' +
+      '<div class="grid">' + opts + '</div>' +
+      '<div class="hexrow"><input type="text" class="hex" placeholder="#A36E1F" ' +
+      'value="' + esc(current || '') + '" spellcheck="false">' +
+      '<button type="button" class="act">Apply</button></div>' +
+      '<button type="button" class="reset">Reset to automatic</button>';
+    root.appendChild(el);
+    pickerEl = el;
+    positionPicker(el, anchor);
+
+    var input = el.querySelector('.hex');
+    if (input && input.focus) input.focus();
+  }
+
+  function positionPicker(el, anchor) {
+    if (!anchor.getBoundingClientRect || !root.getBoundingClientRect) return;
+    var a = anchor.getBoundingClientRect(), r = root.getBoundingClientRect();
+    var top = (a.top - r.top) - 8;
+    var left = (a.left - r.left);
+    // Open upward from the legend and keep the popover inside the iframe.
+    el.style.left = Math.max(6, Math.min(left, (r.width || 0) - 194)) + 'px';
+    el.style.top = Math.max(6, top - 236) + 'px';
+  }
+
+  function rgbToHex(css) {
+    var s = String(css == null ? '' : css).trim();
+    if (/^#/.test(s)) return s;
+    var m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(s);
+    if (!m) return '';
+    return '#' + [1, 2, 3].map(function (i) {
+      return ('0' + Number(m[i]).toString(16)).slice(-2);
+    }).join('');
+  }
+
+  function bindLegend() {
+    if (root.__ptLegendBound) return;
+    root.__ptLegendBound = true;
+    root.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+
+      var preset = t.closest('.opt');
+      if (preset) { setColor(pickerToken, preset.getAttribute('data-hex')); return; }
+
+      if (t.closest('.act')) {
+        var input = pickerEl && pickerEl.querySelector('.hex');
+        var hex = normalizeHex(input && input.value);
+        if (!hex) { if (input && input.classList) input.classList.add('bad'); return; }
+        setColor(pickerToken, hex);
+        return;
+      }
+
+      if (t.closest('.reset')) { setColor(pickerToken, null); return; }
+      if (t.closest('.pick')) return;                       // clicks inside stay
+
+      var chip = t.closest('.lg');
+      if (chip) { openPicker(chip, chip.getAttribute('data-lgv')); return; }
+      closePicker();                                        // anywhere else
+    });
+  }
+
   function paintShell(cfg, layout, grid, resolved, requested, populated) {
     var compact = !!cfg.compact;
     var compiled = window.PivotColors.compile(cfg.colorRules);
@@ -539,12 +768,14 @@
 
     // Stable color domain so palette assignment doesn't shift between renders.
     var domain = [];
+    var hasBlank = false;
     if (cfg.colorColumn) {
       var seen = Object.create(null);
       var carr = state.data[cfg.colorColumn] || [];
       for (var i = 0; i < carr.length; i++) {
         var v = carr[i];
-        if (v === null || v === undefined || v === '') continue;
+        if (v === null || v === undefined || v === '' ||
+            (typeof v === 'string' && v.trim() === '')) { hasBlank = true; continue; }
         var s = String(v);
         if (!seen[s]) { seen[s] = true; domain.push(s); }
       }
@@ -552,7 +783,7 @@
     }
 
     var leftWidths = measureLeft(grid, layout, compact);
-    var cellWidth = measureCells(grid, layout, compact);
+    var cellWidth = measureCells(grid, layout, compact, !!cfg.inlineLabels);
     var rowH = rowHeight(layout.valueColumns.length, compact);
 
     // Everything paintWindow() needs, so scrolling touches no config parsing.
@@ -561,6 +792,7 @@
       data: grid.data || {},
       compiled: compiled, styles: styles, domain: domain,
       autoPalette: cfg.autoPalette !== false,
+      inlineLabels: !!cfg.inlineLabels,
       colorColumn: cfg.colorColumn || null,
       colorArr: cfg.colorColumn ? (state.data[cfg.colorColumn] || []) : null,
       rowH: rowH, leftWidths: leftWidths, cellWidth: cellWidth,
@@ -630,6 +862,8 @@
     }
     html.push('</thead><tbody></tbody></table></div>');
 
+    html.push(legendHtml(cfg, compiled, domain, hasBlank));
+
     var notes = [];
     if (!state.complete) {
       notes.push('Loading rows from Sigma\u2026 ' + (state.loaded || 0).toLocaleString() +
@@ -641,6 +875,7 @@
         ' of ' + grid.totalRows.toLocaleString() + ' rows. ' +
         'Raise or clear <b>Max rows</b> in the editor panel to show more.');
     }
+    if (colorWriteError) notes.push(colorWriteError);
     if (notes.length) {
       html.push('<div class="note">' + notes.join(' &nbsp;\u00b7&nbsp; ') + '</div>');
     }
@@ -693,6 +928,7 @@
     wrapEl = root.querySelector('.wrap');
     tbodyEl = root.querySelector('table.pivot tbody');
     bindGrid();
+    bindLegend();
     paintWindow(true);
   }
 
@@ -790,7 +1026,14 @@
           var vid = layout.valueColumns[l];
           var text = fmt((data[vid] || [])[ri], vid);
           if (!text) continue;
-          lines += '<span class="line l' + l + '"' + sty(styles, vid) + '>' + esc(text) + '</span>';
+          // The field name is a separate span so it can be styled -- and greyed --
+          // independently of the value it introduces.
+          var tag = view.inlineLabels
+            ? '<span class="ilbl"' + sty(styles, vid, 'header') + '>' +
+              esc(colName(vid)) + ':</span> '
+            : '';
+          lines += '<span class="line l' + l + '"' + sty(styles, vid) + '>' +
+            tag + esc(text) + '</span>';
         }
       } else {
         lines = '<span class="status"' + sty(styles, view.colorColumn) + '>' +
