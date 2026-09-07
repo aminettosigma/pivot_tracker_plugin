@@ -10,16 +10,45 @@
      - valueColumns: everything left over -> rendered inside the cell pill
 
    The (rowKey, pivotColumn) pair is chosen as the dimension pair that most nearly
-   forms a complete grid and uniquely identifies each source row. */
+   forms a complete grid and uniquely identifies each source row.
+
+   Everything here reads the column arrays by index. Materializing one object per
+   source row costs ~380 MB and seconds of GC at 390k rows, and nothing needs the
+   objects -- every probe is a single pass over one or two columns. */
 (function (global) {
   'use strict';
 
-  function toRows(data, colIds) {
+  // Above this many rows, structural probes run on a prefix rather than the whole
+  // column. Probing every candidate pair across 1M rows costs seconds on the main
+  // thread, and a prefix answers the same question for real pivot data.
+  var SAMPLE_LIMIT = 20000;
+  var PROBE_LIMIT = 50000;
+
+  var NULL_KEY = '\u0000null';
+
+  /* Map keys. Using the raw value avoids building a string per row per column --
+     at 1M rows that string building dominated detection. A Map distinguishes 1
+     from '1' natively, which is what the old typeof-prefixed string key was for. */
+  function mapKey(v) {
+    if (v === null || v === undefined) return NULL_KEY;
+    if (v instanceof Date) return '\u0000d' + v.getTime();
+    if (typeof v === 'object') return '\u0000o' + String(v);
+    return v;
+  }
+
+  function rowCount(data, colIds) {
     var n = 0;
-    colIds.forEach(function (id) {
-      var arr = data[id];
+    for (var i = 0; i < colIds.length; i++) {
+      var arr = data[colIds[i]];
       if (Array.isArray(arr) && arr.length > n) n = arr.length;
-    });
+    }
+    return n;
+  }
+
+  /* Kept for callers that genuinely want objects (tests, ad-hoc inspection).
+     The detection path deliberately does not use it. */
+  function toRows(data, colIds) {
+    var n = rowCount(data, colIds);
     var rows = [];
     for (var i = 0; i < n; i++) {
       var row = {};
@@ -38,37 +67,49 @@
     return typeof v + ':' + String(v);
   }
 
-  function distinct(rows, colId) {
-    var set = Object.create(null);
-    var count = 0;
-    for (var i = 0; i < rows.length; i++) {
-      var k = key(rows[i][colId]);
-      if (!(k in set)) { set[k] = true; count++; }
-    }
-    return count;
+  function distinct(data, colId, n) {
+    var arr = data[colId];
+    if (!arr) return 0;
+    var set = new Set();
+    for (var i = 0; i < n; i++) set.add(mapKey(arr[i]));
+    return set.size;
+  }
+
+  /* Exact cardinality costs a full pass per column -- 2.2 s across 9 columns at 2M
+     rows, the single biggest cost in detection. Cardinality is only used to reject
+     candidates ("does this column repeat?") and to score how completely a pair
+     fills a grid, and both are ratios that a bounded window answers: with a small
+     pivot cardinality, prefix ratios match full-data ratios. */
+  function sampledDistinct(data, colId, probeN) {
+    return distinct(data, colId, probeN);
   }
 
   // Is `dep` constant within each distinct value of `base`?
-  function dependsOn(rows, dep, base) {
-    var seen = Object.create(null);
-    for (var i = 0; i < rows.length; i++) {
-      var bk = key(rows[i][base]);
-      var dk = key(rows[i][dep]);
-      if (bk in seen) {
-        if (seen[bk] !== dk) return false;
-      } else {
-        seen[bk] = dk;
-      }
+  function dependsOn(data, dep, base, n) {
+    var depArr = data[dep], baseArr = data[base];
+    if (!depArr || !baseArr) return false;
+    var seen = new Map();
+    for (var i = 0; i < n; i++) {
+      var bk = mapKey(baseArr[i]);
+      var dk = mapKey(depArr[i]);
+      var prev = seen.get(bk);
+      if (prev === undefined && !seen.has(bk)) seen.set(bk, dk);
+      else if (prev !== dk) return false;
     }
     return true;
   }
 
-  function uniquePair(rows, a, b) {
-    var seen = Object.create(null);
-    for (var i = 0; i < rows.length; i++) {
-      var k = key(rows[i][a]) + '\u0001' + key(rows[i][b]);
-      if (k in seen) return false;
-      seen[k] = true;
+  function uniquePair(data, a, b, n) {
+    var aArr = data[a], bArr = data[b];
+    if (!aArr || !bArr) return false;
+    var seen = new Map();
+    for (var i = 0; i < n; i++) {
+      var ak = mapKey(aArr[i]);
+      var inner = seen.get(ak);
+      if (inner === undefined) { inner = new Set(); seen.set(ak, inner); }
+      var bk = mapKey(bArr[i]);
+      if (inner.has(bk)) return false;
+      inner.add(bk);
     }
     return true;
   }
@@ -83,53 +124,81 @@
    * @param data     column-oriented element data { [colId]: value[] }
    * @param columns  Sigma ColumnInfo map { [colId]: { name, columnType, format } }
    * @param overrides { rowColumns?, pivotColumn?, valueColumns?, excludeColumns? }
-   * @returns { rowKey, rowColumns, pivotColumn, columnDims, valueColumns, detected, rowCount, reason }
+   * @returns { rowKey, rowColumns, pivotColumn, columnDims, valueColumns, detected,
+   *            rowCount, reason, data, colIds }
    */
   function detect(data, columns, overrides) {
     overrides = overrides || {};
+    data = data || {};
     // Only consider columns that actually carry data for this element.
     var colIds = Object.keys(columns || {}).filter(function (id) {
       return Array.isArray(data[id]);
     });
-    if (!colIds.length) colIds = Object.keys(data || {});
+    if (!colIds.length) colIds = Object.keys(data);
 
-    var rows = toRows(data, colIds);
+    var n = rowCount(data, colIds);
     var result = {
       rowKey: null, rowColumns: [], pivotColumn: null, columnDims: [], valueColumns: [],
-      rows: rows, rowCount: rows.length, detected: {}, reason: null
+      data: data, colIds: colIds, rowCount: n, detected: {}, reason: null
     };
-    if (!rows.length) { result.reason = 'no rows'; return result; }
+    if (!n) { result.reason = 'no rows'; return result; }
 
-    var stats = {};
-    colIds.forEach(function (id) { stats[id] = distinct(rows, id); });
+    /* Cardinality is sampled (see sampledDistinct) and therefore relative to
+       probeN, not to n. Every comparison below is written against probeN so the
+       two never get mixed up. */
+    var probeN = Math.min(n, PROBE_LIMIT);
+    var stats = Object.create(null);
+    function statOf(id) {
+      if (!(id in stats)) {
+        stats[id] = Array.isArray(data[id]) ? sampledDistinct(data, id, probeN) : undefined;
+      }
+      return stats[id];
+    }
+    function known(id) { return Array.isArray(data[id]); }
 
-    var pivotColumn = overrides.pivotColumn && stats[overrides.pivotColumn] !== undefined
+    var pivotColumn = overrides.pivotColumn && known(overrides.pivotColumn)
       ? overrides.pivotColumn : null;
     var rowKey = null;
 
-    var explicitRows = (overrides.rowColumns || []).filter(function (id) {
-      return stats[id] !== undefined;
-    });
+    var explicitRows = (overrides.rowColumns || []).filter(known);
     if (explicitRows.length) rowKey = explicitRows[0];
 
-    // Candidate dimensions: repeat across rows, so they can't be per-cell measures.
-    var candidates = colIds.filter(function (id) {
-      return isDimensionType(columns[id]) && stats[id] > 1 && stats[id] < rows.length;
-    });
-
     if (!pivotColumn || !rowKey) {
-      var best = null;
+      // Candidate dimensions: repeat within the probe window, so they can't be
+      // per-cell measures.
+      var candidates = colIds.filter(function (id) {
+        return isDimensionType(columns[id]) && statOf(id) > 1 && statOf(id) < probeN;
+      });
+
+      var probe = Math.min(n, SAMPLE_LIMIT);
+      var scored = [];
       for (var a = 0; a < candidates.length; a++) {
         for (var b = 0; b < candidates.length; b++) {
           if (a === b) continue;
           var r = candidates[a], c = candidates[b];
           if (rowKey && r !== rowKey) continue;
           if (pivotColumn && c !== pivotColumn) continue;
-          if (!uniquePair(rows, r, c)) continue;
-          // Prefer the pair that best fills a complete grid.
-          var fill = rows.length / (stats[r] * stats[c]);
-          var score = fill - Math.abs(1 - fill);
-          if (!best || score > best.score) best = { rowKey: r, pivotColumn: c, score: score };
+          if (!uniquePair(data, r, c, probe)) continue;
+          // Prefer the pair that best fills a complete grid. Both cardinalities
+          // and the row count come from the same window, so the ratio is sound.
+          var fill = probeN / (statOf(r) * statOf(c));
+          scored.push({ rowKey: r, pivotColumn: c, score: fill - Math.abs(1 - fill) });
+        }
+      }
+      scored.sort(function (x, y) { return y.score - x.score; });
+
+      /* A prefix can admit a pair that collides later, so confirm the winner over
+         a wider slice and fall through to the next best if it does not hold. The
+         confirmation is itself bounded: at 1M+ rows a full re-scan per candidate
+         is seconds of blocked main thread, and build() tolerates a wrong guess
+         (cells simply overwrite) where a frozen tab is unrecoverable. */
+      var confirm = Math.min(n, PROBE_LIMIT);
+      var best = null;
+      for (var i = 0; i < scored.length; i++) {
+        if (confirm === probe ||
+            uniquePair(data, scored[i].rowKey, scored[i].pivotColumn, confirm)) {
+          best = scored[i];
+          break;
         }
       }
       if (best) {
@@ -157,29 +226,32 @@
       rowColumns = [rowKey];
       colIds.forEach(function (id) {
         if (id === rowKey || id === pivotColumn) return;
-        if (stats[id] <= 1) return;
-        if (dependsOn(rows, id, rowKey)) rowColumns.push(id);
+        if (statOf(id) <= 1) return;
+        if (dependsOn(data, id, rowKey, n)) rowColumns.push(id);
       });
       result.detected.rowColumns = true;
     }
     result.rowColumns = rowColumns;
 
-    // Attributes of the column dimension (constant per pivot value, e.g. a stage's
-    // capacity) describe the header, not the cell -- surface them there instead.
+    var excluded = overrides.excludeColumns || [];
+    var explicitValues = (overrides.valueColumns || []).filter(known);
+
+    /* Attributes of the column dimension (constant per pivot value, e.g. a stage's
+       capacity) describe the header, not the cell -- surface them there instead.
+       Only columns that could actually be rendered need this probe: with explicit
+       value columns, that is exactly those, so unrelated columns cost nothing. */
+    var probeForDims = explicitValues.length ? explicitValues : colIds;
     var columnDims = [];
-    colIds.forEach(function (id) {
+    probeForDims.forEach(function (id) {
       if (id === rowKey || id === pivotColumn) return;
       if (rowColumns.indexOf(id) !== -1) return;
-      if (stats[id] <= 1) return;
-      if (dependsOn(rows, id, pivotColumn)) columnDims.push(id);
+      if (columnDims.indexOf(id) !== -1) return;
+      if (statOf(id) <= 1) return;
+      if (dependsOn(data, id, pivotColumn, n)) columnDims.push(id);
     });
     result.columnDims = columnDims;
 
     // Value columns: whatever describes neither dimension.
-    var explicitValues = (overrides.valueColumns || []).filter(function (id) {
-      return stats[id] !== undefined || Array.isArray(data[id]);
-    });
-    var excluded = overrides.excludeColumns || [];
     if (explicitValues.length) {
       // A listed column that is constant per pivot value describes the header, so
       // keep it there only -- otherwise it would render in the header AND the pill.
@@ -197,35 +269,62 @@
     return result;
   }
 
-  /** Build the ordered pivot grid from a detect() result. */
-  function build(layout, colorColumnId) {
-    var rows = layout.rows;
-    var pivotKeys = [], pivotSeen = Object.create(null);
-    var rowOrder = [], rowMap = Object.create(null);
+  /** Build the ordered pivot grid from a detect() result.
+   *
+   *  Rows and cells hold *source row indices*, not copied values: a cell is the
+   *  integer index its data lives at, so the renderer reads `data[colId][index]`
+   *  on demand. At 1M source rows the previous shape allocated ~2M objects here.
+   *
+   *  @param maxRows optional cap on output rows; 0/undefined means unlimited. */
+  function build(layout, colorColumnId, maxRows) {
+    var data = layout.data || {};
+    var n = layout.rowCount || 0;
+    var limit = maxRows > 0 ? maxRows : 0;
 
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      var pv = row[layout.pivotColumn];
-      var pk = key(pv);
-      if (!(pk in pivotSeen)) {
-        pivotSeen[pk] = true;
+    var pivotKeys = [], pivotIndex = new Map();
+    var rowOrder = [], rowIndex = new Map();
+    var columnDims = layout.columnDims || [];
+    var pivotArr = data[layout.pivotColumn], keyArr = data[layout.rowKey];
+    var truncated = 0;
+
+    for (var i = 0; i < n; i++) {
+      var pv = pivotArr ? pivotArr[i] : null;
+      var pmk = mapKey(pv);
+      var ci = pivotIndex.get(pmk);
+      if (ci === undefined) {
         var attrs = {};
-        (layout.columnDims || []).forEach(function (c) { attrs[c] = row[c]; });
-        pivotKeys.push({ k: pk, value: pv, attrs: attrs });
+        for (var d = 0; d < columnDims.length; d++) {
+          attrs[columnDims[d]] = (data[columnDims[d]] || [])[i];
+        }
+        ci = pivotKeys.length;
+        pivotIndex.set(pmk, ci);
+        pivotKeys.push({ k: key(pv), value: pv, attrs: attrs, index: ci });
       }
-      var rk = key(row[layout.rowKey]);
-      if (!(rk in rowMap)) {
-        rowMap[rk] = { key: rk, rowValues: {}, cells: Object.create(null) };
-        layout.rowColumns.forEach(function (c) { rowMap[rk].rowValues[c] = row[c]; });
-        rowOrder.push(rowMap[rk]);
+
+      var rmk = mapKey(keyArr ? keyArr[i] : null);
+      var row = rowIndex.get(rmk);
+      if (row === undefined) {
+        // Past the cap, keep counting distinct rows for the "showing N of M" note
+        // but stop building them.
+        if (limit && rowOrder.length >= limit) { rowIndex.set(rmk, null); truncated++; continue; }
+        row = { key: key(keyArr ? keyArr[i] : null), index: i, cells: [] };
+        rowIndex.set(rmk, row);
+        rowOrder.push(row);
+      } else if (row === null) {
+        continue;
       }
-      var cell = { values: {}, color: colorColumnId ? row[colorColumnId] : null, source: row };
-      layout.valueColumns.forEach(function (c) { cell.values[c] = row[c]; });
-      rowMap[rk].cells[pk] = cell;
+
+      row.cells[ci] = i;
     }
 
-    return { pivotKeys: pivotKeys, rows: rowOrder };
+    return {
+      pivotKeys: pivotKeys, rows: rowOrder, data: data,
+      colorColumn: colorColumnId || null,
+      totalRows: rowOrder.length + truncated, truncated: truncated
+    };
   }
 
-  global.PivotDetect = { detect: detect, build: build, toRows: toRows, key: key };
+  global.PivotDetect = {
+    detect: detect, build: build, toRows: toRows, key: key, rowCount: rowCount
+  };
 })(window);

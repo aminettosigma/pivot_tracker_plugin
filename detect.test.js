@@ -77,7 +77,17 @@ var grid = PivotDetect.build(b, ID.status);
 check('header carries capacity attr', grid.pivotKeys[0].attrs[ID.cap], 80);
 check('pivot value count', grid.pivotKeys.length, 13);
 check('row count', grid.rows.length, 6);
-check('cell has no capacity', Object.keys(grid.rows[0].cells[grid.pivotKeys[0].k].values).length, 3);
+// Cells are source row indices now, so the value columns are read from the data.
+var firstCell = grid.rows[0].cells[grid.pivotKeys[0].index];
+check('cell is a source row index', typeof firstCell, 'number');
+check('cell index resolves the right plate',
+  sandbox.DATA[ID.plate][firstCell], sandbox.DATA[ID.plate][0]);
+check('cell index resolves the right stage',
+  sandbox.DATA[ID.stage][firstCell], grid.pivotKeys[0].value);
+// detect() is handed a scoped copy, so compare the underlying column arrays.
+check('grid exposes the data for index lookups',
+  grid.data[ID.plate] === sandbox.DATA[ID.plate], true);
+check('row exposes its own source index', typeof grid.rows[0].index, 'number');
 
 console.log('\n--- nothing configured ---');
 var c = PivotDetect.detect({}, {}, {});
