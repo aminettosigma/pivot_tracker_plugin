@@ -54,6 +54,16 @@ root.querySelector = function (sel) {
    reads its own '.hex' input back. Selector lookups inside the popover return the
    same stub each time so a test can set a value and then fire Apply. */
 root.children = [];
+/* Setting innerHTML discards child nodes in a browser. Model that, or appended
+   nodes -- the color picker popover, the lost-row note -- would pile up across
+   paints and make child counts meaningless. */
+(function () {
+  var buf = '';
+  Object.defineProperty(root, 'innerHTML', {
+    get: function () { return buf; },
+    set: function (v) { buf = v; root.children = []; }
+  });
+})();
 root.appendChild = function (el) { root.children.push(el); el.parentNode = root; return el; };
 root.removeChild = function (el) {
   root.children = root.children.filter(function (c) { return c !== el; });
@@ -77,7 +87,7 @@ function createElement(tag) {
 }
 
 var sandbox = {
-  console: console, setTimeout: setTimeout,
+  console: console, setTimeout: setTimeout, clearTimeout: clearTimeout,
   setInterval: function (fn) { sandbox.__tick = fn; return 1; },
   requestAnimationFrame: function (fn) { fn(); return 1; }
 };
@@ -130,13 +140,18 @@ sandbox.SigmaPlugin = {
         pager.send();
         return function () {};
       },
-      fetchMoreElementData: function () { fetchMores++; if (pager) pager.send(); }
+      fetchMoreElementData: function () { fetchMores++; if (pager && autoSend) pager.send(); }
     }
   }
 };
 var vars = [], actions = [];
 var writes = [];
 var pages = [], pager = null, fetchMores = 0, loadingStates = [];
+/* Pages normally cascade: fetchMore immediately delivers the next one, so a whole
+   load runs in one call stack. Turning that off lets a test step through a reload
+   page by page and inspect the DOM between pages, which is the only way to prove
+   the grid is not repainted mid-reload. */
+var autoSend = true;
 
 /* Settings edits reach a real plugin through subscribe(), not through
    config.get(). Drive them that way so the suite exercises the same path the
@@ -521,6 +536,131 @@ fetchMores = 0; pager = null;
 setConfig({ source: 'el-stalled', debug: true });
 check('stopped fetching after no progress', fetchMores <= 3, true);
 check('gave up and marked complete', diag('loadComplete'), true);
+
+console.log('\n--- a reload must not repaint until it is complete ---');
+/* This is the bug the plan was written for: rows are sorted globally and then
+   capped, so repainting a half-loaded reload showed the first N rows *of the
+   fraction that had arrived* -- a different plate set roughly twenty times per
+   reload. Step through a five-page reload and require the grid to hold still. */
+autoSend = false;
+// The fixture is 18 rows tall; give the viewport a smaller height than the grid so
+// there is somewhere to scroll to, otherwise every scrollTop clamps to 0.
+wrap.clientHeight = 120;
+var small = sandbox.DATA;
+var smallCols = Object.keys(small);
+var smallLen = small[smallCols[0]].length;
+function smallSlice(from, to) {
+  var d = {};
+  smallCols.forEach(function (k) { d[k] = small[k].slice(from, to); });
+  return d;
+}
+function fivePages(data) {
+  var n = data[smallCols[0]].length, step = Math.ceil(n / 5), out = [];
+  for (var i = 0; i < n; i += step) {
+    var d = {};
+    smallCols.forEach(function (k) { d[k] = data[k].slice(i, i + step); });
+    out.push({ data: d, offset: i, isComplete: i + step >= n, totalRows: n });
+  }
+  return out;
+}
+
+pages = fivePages(small);
+fetchMores = 0; pager = null;
+setConfig({ source: 'el-reload', rowColumns: [ID.plate, ID.plex], pivotColumn: ID.stage,
+  valueColumns: [ID.ts, ID.op], colorColumn: ID.status, maxRows: '0', debug: true,
+  // Earlier blocks left a sort in place; these checks reason about row order, so
+  // put it back to plain ascending by the row key.
+  sortRowColumn: [], sortRowDesc: false, sortColumnColumn: [], sortColumnDesc: false });
+// Drive the first load to completion by hand.
+while (pager.next < pages.length) pager.send();
+check('first load painted the grid', countPills(tbody.innerHTML) > 0, true);
+check('first load is complete', diag('loadComplete'), true);
+
+var beforeRepaints = diag('repaints');
+var beforeBuffered = diag('bufferedReloads');
+var beforeGrid = tbody.innerHTML;
+// Sigma re-runs the query: page 0 arrives again on the same subscription.
+pager.next = 0;
+var midChanged = 0;
+for (var p = 0; p < pages.length; p++) {
+  pager.send();
+  if (p < pages.length - 1 && tbody.innerHTML !== beforeGrid) midChanged++;
+}
+check('grid was byte-identical through every partial page', midChanged, 0);
+check('the reload repainted exactly once', diag('repaints') - beforeRepaints, 1);
+check('the reload was buffered, not applied in place',
+  diag('bufferedReloads') - beforeBuffered, 1);
+check('and it ended with the buffer swapped in', diag('buffering'), false);
+check('same rows after the reload', countPills(tbody.innerHTML), countPills(beforeGrid));
+
+console.log('\n--- the viewport is restored by row, not by pixel ---');
+var rowH2 = Number(/--row-h: (\d+)px/.exec(root.innerHTML)[1]);
+/* Work in terms of the *detected* row key rather than assuming it is Plate Id:
+   detection decides that, and this fixture pivots to six rows. A one-row viewport
+   leaves room to scroll in a grid that short. */
+var rkName = /&quot;rowKey&quot;: &quot;([^&]*)&quot;/.exec(root.innerHTML)[1];
+var rkId = Object.keys(sandbox.COLUMNS).filter(function (id) {
+  return sandbox.COLUMNS[id].name === rkName;
+})[0];
+var rkValues = [];
+small[rkId].forEach(function (v) { if (rkValues.indexOf(v) === -1) rkValues.push(v); });
+rkValues.sort();
+check('fixture has rows to scroll through', rkValues.length >= 5, true);
+
+wrap.clientHeight = rowH2;
+wrap.scrollTop = 3 * rowH2;
+wrap.fire('scroll', {});
+pager.next = 0;
+for (var q = 0; q < pages.length; q++) pager.send();
+check('unchanged data restores the same offset', wrap.scrollTop, 3 * rowH2);
+
+/* Now drop the two rows above the anchor. The old pixel offset would land two rows
+   too far down; anchoring by row key must scroll up by exactly that much so the
+   row the user was looking at stays where it was. */
+function without(drop) {
+  var d = {};
+  smallCols.forEach(function (k) { d[k] = []; });
+  for (var i = 0; i < smallLen; i++) {
+    if (drop.indexOf(small[rkId][i]) !== -1) continue;
+    smallCols.forEach(function (k) { d[k].push(small[k][i]); });
+  }
+  return d;
+}
+var droppedAbove = rkValues.slice(0, 2);
+pages = fivePages(without(droppedAbove));
+pager.next = 0;
+for (var r = 0; r < pages.length; r++) pager.send();
+check('anchor row kept its pixel offset after 2 rows vanished above it',
+  wrap.scrollTop, 1 * rowH2);
+
+console.log('\n--- a genuinely missing anchor row is reported ---');
+wrap.scrollTop = 0;
+wrap.fire('scroll', {});
+// The row now at the top is the first one that survived; remove that too.
+var vanishing = rkValues[2];
+pages = fivePages(without(droppedAbove.concat([vanishing])));
+pager.next = 0;
+for (var s = 0; s < pages.length; s++) pager.send();
+var warn = root.children.filter(function (c) { return c.className === 'note warn'; });
+check('a warning note was appended', warn.length, 1);
+check('it names the row that disappeared',
+  warn.length ? warn[0].innerHTML.indexOf(String(vanishing)) !== -1 : false, true);
+check('and the view sits at the top', wrap.scrollTop, 0);
+check('no note is left behind when the anchor is found', (function () {
+  root.children = [];
+  pager.next = 0;
+  for (var t = 0; t < pages.length; t++) pager.send();
+  return root.children.filter(function (c) { return c.className === 'note warn'; }).length;
+})(), 0);
+autoSend = true;
+
+console.log('\n--- column widths are pinned across a reload ---');
+var widthBefore = /<col style="width:(\d+)px">/.exec(root.innerHTML)[1];
+pager.next = 0;
+for (var u = 0; u < pages.length; u++) pager.send();
+check('same measured cell width', /<col style="width:(\d+)px">/.exec(root.innerHTML)[1],
+  widthBefore);
+wrap.clientHeight = 600;
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

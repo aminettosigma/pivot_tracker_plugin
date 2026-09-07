@@ -87,8 +87,13 @@
 
   var root = document.getElementById('root');
   var state = { config: {}, data: null, columns: null, selected: null,
-    loaded: 0, totalRows: null, complete: false, dataVersion: 0 };
+    loaded: 0, totalRows: null, complete: false, dataVersion: 0, pending: null };
   var unsubData = null, unsubCols = null, boundKey = null, boundElement = null, lastConfigJson = null;
+  /* `rendered` says a grid -- not a message -- is on screen, which is what makes a
+     page 0 a reload rather than a first load. `buffering` means pages are landing
+     in state.pending; `frozen` means the buffer was too big to keep and repaints
+     are suppressed until the load finishes. */
+  var rendered = false, buffering = false, frozen = false;
   // Config the host has actually emitted, and the keys it has ever mentioned.
   var emitted = {}, emittedKeys = Object.create(null);
 
@@ -169,6 +174,10 @@
       boundElement = sourceId;
       state.data = null;
       state.columns = null;
+      // A different element invalidates any buffered reload of the old one.
+      state.pending = null;
+      buffering = false;
+      frozen = false;
     }
     if (!sourceId) { render(); return; }
 
@@ -202,7 +211,14 @@
 
   var HARD_ROW_CEILING = 5000000;   // refuse to accumulate beyond this
   var CHUNK_RENDER_MS = 500;        // repaint at most this often while loading
+  /* A shadow buffer holds a second copy of the element while it reloads. At the
+     measured 2.5 GB peak for 2M rows that copy is not affordable, so past this
+     many rows we give the copy back and simply stop repainting instead. */
+  var BUFFER_ROW_LIMIT = 750000;
   var noProgress = 0, lastChunkPaint = 0, chunkTimer = null;
+  /* Counters for the diagnostics block: they are what distinguishes the plugin
+     repainting itself from Sigma re-mounting the iframe underneath it. */
+  var stats = { deliveries: 0, rebuilds: 0, repaints: 0, buffered: 0, frozen: 0 };
 
   function setLoading(on) {
     try { client.config.setLoadingState(!!on); } catch (e) { /* older host */ }
@@ -213,15 +229,41 @@
      bump a version so the layout memo still invalidates. */
   function mergeChunk(chunk, sourceId) {
     if (!chunk || typeof chunk !== 'object') return;
+    stats.deliveries++;
     var incoming = chunk.data || {};
     var offset = typeof chunk.offset === 'number' ? chunk.offset : 0;
 
-    if (offset === 0 || !state.data) { state.data = {}; state.loaded = 0; }
+    /* A fresh page 0 on top of a grid that is already on screen is a *refetch* --
+       Sigma re-running the query after a comment was written. Accumulating it
+       into state.data in place is what made the plugin thrash: rows are sorted
+       globally and then capped, so every intermediate repaint showed the first N
+       sorted rows *of the fraction loaded so far*, a different plate set on each
+       of the ~20 pages. Load into a shadow buffer instead and swap once, so the
+       user sees the old grid until the new one is complete. */
+    if (offset === 0) {
+      if (state.data && rendered) {
+        state.pending = {};
+        buffering = true;
+        frozen = false;
+        stats.buffered++;
+      } else {
+        state.data = {};
+        state.pending = null;
+        buffering = false;
+        frozen = false;
+      }
+      state.loaded = 0;
+    } else if (!state.data && !buffering) {
+      state.data = {};
+      state.loaded = 0;
+    }
+
+    var sink = buffering ? state.pending : state.data;
 
     Object.keys(incoming).forEach(function (id) {
       if (id === '__proto__') return;
-      var target = state.data[id];
-      if (!Array.isArray(target)) target = state.data[id] = [];
+      var target = sink[id];
+      if (!Array.isArray(target)) target = sink[id] = [];
       // A re-sent page rewinds to its offset rather than duplicating rows.
       if (target.length > offset) target.length = offset;
       var src = incoming[id] || [];
@@ -229,9 +271,21 @@
     });
 
     var loaded = 0;
-    Object.keys(state.data).forEach(function (id) {
-      if (state.data[id].length > loaded) loaded = state.data[id].length;
+    Object.keys(sink).forEach(function (id) {
+      if (sink[id].length > loaded) loaded = sink[id].length;
     });
+
+    /* Too big to hold two copies: hand the buffer over as the live data (which
+       releases the old copy, so the peak is unchanged) and keep suppressing
+       repaints. The grid on screen is then stale for the rest of the load, but a
+       frozen grid is what the user asked for and it beats running out of memory. */
+    if (buffering && loaded > BUFFER_ROW_LIMIT) {
+      state.data = state.pending;
+      state.pending = null;
+      buffering = false;
+      frozen = true;
+      stats.frozen++;
+    }
     noProgress = loaded > state.loaded ? 0 : noProgress + 1;
     state.loaded = loaded;
     state.totalRows = chunk.totalRows || state.totalRows;
@@ -247,6 +301,23 @@
     } else {
       state.complete = true;
       setLoading(false);
+    }
+
+    /* A load that is buffering or frozen paints exactly once, when it completes.
+       Anything else is the first load, where showing a prefix is better than
+       showing nothing. */
+    if (buffering || frozen) {
+      if (!state.complete) return;
+      if (buffering) { state.data = state.pending; state.pending = null; }
+      buffering = false;
+      frozen = false;
+      // Only a reload warns about a lost row: a config or layout change is
+      // *expected* to move rows around, so a warning there would be noise.
+      reloadPaint = true;
+      lastChunkPaint = Date.now();
+      if (chunkTimer) { clearTimeout(chunkTimer); chunkTimer = null; }
+      render();
+      return;
     }
 
     /* Paint the first page immediately so something is on screen, then throttle:
@@ -381,6 +452,61 @@
 
   function message(text, cls) {
     root.innerHTML = '<div class="msg ' + (cls || '') + '">' + esc(text) + '</div>';
+    // No grid on screen, so the next page 0 counts as a first load, not a reload.
+    rendered = false;
+    wrapEl = tbodyEl = null;
+  }
+
+  /* Scroll position is restored by *row identity*, not by scrollTop. A reload can
+     change the row set -- new plates appear, the Max rows cap keeps a different
+     slice -- so the same pixel offset lands on a different plate, which is what
+     made the clicked cell appear to move or vanish. Remember which row was where
+     instead, and put that row back at the same pixel. */
+  var anchor = null, anchorLost = null, reloadPaint = false;
+  // Pinned column widths; see the signature check in paintShell().
+  var widthCache = null;
+
+  function captureAnchor() {
+    if (!wrapEl || !view || !view.grid || !view.grid.rows.length) return;
+    var rows = view.grid.rows, rowH = view.rowH;
+    var scrollTop = wrapEl.scrollTop || 0;
+    var viewportH = wrapEl.clientHeight || 0;
+    var idx = Math.min(rows.length - 1, Math.max(0, Math.floor(scrollTop / rowH)));
+
+    /* The clicked row is the one the user is watching, so prefer it -- but only
+       while it is actually on screen, otherwise scrolling away from a selection
+       would keep dragging the viewport back to it. */
+    var selKey = state.selected ? String(state.selected).split('\u0001')[0] : null;
+    if (selKey) {
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].key !== selKey) continue;
+        var top = i * rowH;
+        if (top + rowH > scrollTop && top < scrollTop + viewportH) idx = i;
+        break;
+      }
+    }
+
+    anchor = {
+      key: rows[idx].key,
+      offset: idx * rowH - scrollTop,      // that row's top, relative to viewport
+      scrollLeft: wrapEl.scrollLeft || 0
+    };
+  }
+
+  function restoreAnchor() {
+    var a = anchor;
+    anchor = null;
+    if (!a || !wrapEl || !view || !view.grid) return;
+    var rows = view.grid.rows, found = -1;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].key === a.key) { found = i; break; }
+    }
+    wrapEl.scrollLeft = a.scrollLeft;
+    if (found === -1) { anchorLost = a.key; return; }
+    anchorLost = null;
+    var max = Math.max(0, rows.length * view.rowH - (wrapEl.clientHeight || 0));
+    wrapEl.scrollTop = clamp(found * view.rowH - a.offset, 0, max);
+    paintWindow(true);
   }
 
   // --- geometry -------------------------------------------------------------
@@ -566,6 +692,7 @@
 
     memo = { data: state.data, columns: state.columns, sig: sig, layout: layout,
       grid: grid, scopedCount: Object.keys(scopedData).length, version: state.dataVersion };
+    stats.rebuilds++;
     return memo;
   }
 
@@ -762,6 +889,11 @@
   }
 
   function paintShell(cfg, layout, grid, resolved, requested, populated) {
+    /* Before anything else: the anchor has to be read while `view` still describes
+       what is on screen. `view` is replaced further down, and capturing after that
+       would anchor to the new row set -- which is exactly the no-op this was
+       written to avoid. */
+    captureAnchor();
     var compact = !!cfg.compact;
     var compiled = window.PivotColors.compile(cfg.colorRules);
     var styles = window.PivotStyles.compile(cfg.columnStyles);
@@ -782,8 +914,20 @@
       domain.sort();
     }
 
-    var leftWidths = measureLeft(grid, layout, compact);
-    var cellWidth = measureCells(grid, layout, compact, !!cfg.inlineLabels);
+    /* Widths are sampled from content, so re-measuring after a reload can shift
+       every column by a few pixels -- which also invalidates the horizontal scroll
+       position we just restored. Measure once per shell shape and pin the result;
+       only a change of layout, of the pill contents, or of the column set remeasures. */
+    var wsig = [layout.rowColumns.join(','), layout.pivotColumn,
+      layout.valueColumns.join(','), grid.pivotKeys.length,
+      compact ? 1 : 0, cfg.inlineLabels ? 1 : 0].join('|');
+    if (!widthCache || widthCache.sig !== wsig) {
+      widthCache = { sig: wsig,
+        left: measureLeft(grid, layout, compact),
+        cell: measureCells(grid, layout, compact, !!cfg.inlineLabels) };
+    }
+    var leftWidths = widthCache.left;
+    var cellWidth = widthCache.cell;
     var rowH = rowHeight(layout.valueColumns.length, compact);
 
     // Everything paintWindow() needs, so scrolling touches no config parsing.
@@ -865,10 +1009,16 @@
     html.push(legendHtml(cfg, compiled, domain, hasBlank));
 
     var notes = [];
+    /* Only the very first load fills in as it goes; a reload is buffered and
+       swapped in one step, so promising otherwise would be a lie. This note is the
+       plugin's only loading indicator -- setLoading() drives Sigma's own bar, so
+       the plugin never adds a second progress widget beside it. */
     if (!state.complete) {
       notes.push('Loading rows from Sigma\u2026 ' + (state.loaded || 0).toLocaleString() +
         (state.totalRows ? ' of ' + state.totalRows.toLocaleString() : '') +
-        ' so far. The grid fills in as pages arrive.');
+        ' so far.' + (rendered
+          ? ' The grid below stays as it is until every page has arrived.'
+          : ' The grid fills in as pages arrive.'));
     }
     if (grid.truncated) {
       notes.push('Showing the first ' + grid.rows.length.toLocaleString() +
@@ -886,6 +1036,18 @@
         rowsLoaded: state.loaded,
         rowsReportedByHost: state.totalRows,
         loadComplete: state.complete,
+        /* Reload accounting. A rebuild count that climbs while nothing was edited
+           means the plugin is thrashing; deliveries climbing with rebuilds flat is
+           the intended buffered reload. And repaints resetting to 1 with the others
+           back at their opening values means Sigma re-mounted the iframe, which is
+           outside the plugin's control. */
+        deliveries: stats.deliveries,
+        rebuilds: stats.rebuilds,
+        repaints: stats.repaints,
+        bufferedReloads: stats.buffered,
+        frozenReloads: stats.frozen,
+        buffering: buffering,
+        frozen: frozen,
         gridRows: grid.rows.length,
         totalRows: grid.totalRows,
         truncated: grid.truncated,
@@ -924,12 +1086,18 @@
     }
 
     root.innerHTML = html.join('');
+    stats.repaints++;
+    rendered = true;
 
     wrapEl = root.querySelector('.wrap');
     tbodyEl = root.querySelector('table.pivot tbody');
     bindGrid();
     bindLegend();
     paintWindow(true);
+    restoreAnchor();
+    if (anchorLost && reloadPaint) noteAnchorLost();
+    anchorLost = null;
+    reloadPaint = false;
   }
 
   /* One click listener for the whole grid rather than one per pill -- at 390k
@@ -958,6 +1126,26 @@
   /* Renders only the rows overlapping the viewport. Two spacer rows stand in for
      everything above and below, so the scrollbar behaves as if the full grid were
      present. */
+  /* The anchor row is gone from the reloaded data -- the plate was filtered out,
+     or the Max rows cap now keeps a different slice. Scrolling somewhere arbitrary
+     and saying nothing is what made cells seem to vanish, so leave the viewport at
+     the top and say what happened. Appended after the paint because the note is
+     only known once the new grid exists. */
+  function noteAnchorLost() {
+    var key = anchorLost;
+    anchorLost = null;
+    if (!root || typeof document.createElement !== 'function') return;
+    var el = document.createElement('div');
+    el.className = 'note warn';
+    // Row keys are type-tagged ("string:100025"); show the value, not the tag.
+    var label = String(key).replace(/^[a-z]+:/, '').replace(/^\u0000null$/, '(blank)');
+    el.innerHTML = 'The row you were on (<b>' + esc(label) +
+      '</b>) is not in the reloaded data, so the view is back at the top.' +
+      (view && view.grid && view.grid.truncated
+        ? ' It may be past the <b>Max rows</b> cap.' : '');
+    root.appendChild(el);
+  }
+
   function paintWindow(force) {
     if (!view || !tbodyEl) return;
     var total = view.grid.rows.length;
