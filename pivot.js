@@ -312,6 +312,16 @@
     return String(a) < String(b);
   }
 
+  /* Sort keys are a list, so rows can be ordered by several columns in priority
+     order (Batch Id then Plate Id, say). Accepts a single id for convenience and
+     drops anything the element is not streaming. */
+  function normalizeSort(spec, data, fallback) {
+    var list = (Array.isArray(spec) ? spec : (spec ? [spec] : [])).filter(function (id) {
+      return Array.isArray(data[id]);
+    });
+    return list.length ? list : [fallback];
+  }
+
   /** Build the ordered pivot grid from a detect() result.
    *
    *  Rows and cells hold *source row indices*, not copied values: a cell is the
@@ -332,18 +342,18 @@
     var n = layout.rowCount || 0;
     var limit = opts.maxRows > 0 ? opts.maxRows : 0;
 
-    var sortRowId = Array.isArray(data[opts.sortRow]) ? opts.sortRow : layout.rowKey;
-    var sortColId = Array.isArray(data[opts.sortColumn]) ? opts.sortColumn : layout.pivotColumn;
+    var sortRowIds = normalizeSort(opts.sortRow, data, layout.rowKey);
+    var sortColIds = normalizeSort(opts.sortColumn, data, layout.pivotColumn);
     var rowDir = opts.sortRowDesc ? -1 : 1;
     var colDir = opts.sortColumnDesc ? -1 : 1;
 
-    var sortRowArr = data[sortRowId] || [];
-    var sortColArr = data[sortColId] || [];
-    /* When the sort column *is* the dimension, every occurrence carries the same
-       value, so the per-row minimum is a no-op and can be skipped -- that is the
+    var sortRowArrs = sortRowIds.map(function (id) { return data[id] || []; });
+    var sortColArrs = sortColIds.map(function (id) { return data[id] || []; });
+    /* When a sort column *is* the dimension, every occurrence carries the same
+       value, so its per-row minimum is a no-op and can be skipped -- that is the
        default path and it keeps build() free of comparisons. */
-    var rowNeedsMin = sortRowId !== layout.rowKey;
-    var colNeedsMin = sortColId !== layout.pivotColumn;
+    var rowNeedsMin = sortRowIds.map(function (id) { return id !== layout.rowKey; });
+    var colNeedsMin = sortColIds.map(function (id) { return id !== layout.pivotColumn; });
 
     var pivotKeys = [], pivotIndex = new Map();
     var rowOrder = [], rowIndex = new Map();
@@ -365,32 +375,46 @@
         ci = pivotKeys.length;
         pivotIndex.set(pmk, ci);
         pivotKeys.push({ k: key(pv), value: pv, attrs: attrs, index: ci,
-          sortVal: sortColArr[i] });
-      } else if (colNeedsMin) {
+          sortVals: sortColArrs.map(function (arr) { return arr[i]; }) });
+      } else {
         var pcur = pivotKeys[ci];
-        if (lower(sortColArr[i], pcur.sortVal)) pcur.sortVal = sortColArr[i];
+        for (var sc = 0; sc < sortColArrs.length; sc++) {
+          if (colNeedsMin[sc] && lower(sortColArrs[sc][i], pcur.sortVals[sc])) {
+            pcur.sortVals[sc] = sortColArrs[sc][i];
+          }
+        }
       }
 
       var rv = keyArr ? keyArr[i] : null;
       var rmk = mapKey(rv);
       var row = rowIndex.get(rmk);
       if (row === undefined) {
-        row = { key: key(rv), index: i, cells: [], sortVal: sortRowArr[i] };
+        row = { key: key(rv), index: i, cells: [],
+          sortVals: sortRowArrs.map(function (arr) { return arr[i]; }) };
         rowIndex.set(rmk, row);
         rowOrder.push(row);
-      } else if (rowNeedsMin) {
-        if (lower(sortRowArr[i], row.sortVal)) row.sortVal = sortRowArr[i];
+      } else {
+        for (var sr = 0; sr < sortRowArrs.length; sr++) {
+          if (rowNeedsMin[sr] && lower(sortRowArrs[sr][i], row.sortVals[sr])) {
+            row.sortVals[sr] = sortRowArrs[sr][i];
+          }
+        }
       }
     }
 
     // Sort before capping, so the cap keeps the first N rows *in sort order* --
     // otherwise which rows survive would depend on arrival order too.
-    rowOrder.sort(function (x, y) {
-      return rowDir * compareValues(x.sortVal, y.sortVal) || compareValues(x.key, y.key);
-    });
-    pivotKeys.sort(function (x, y) {
-      return colDir * compareValues(x.sortVal, y.sortVal) || compareValues(x.k, y.k);
-    });
+    function bySortVals(dir, tie) {
+      return function (x, y) {
+        for (var k = 0; k < x.sortVals.length; k++) {
+          var c = compareValues(x.sortVals[k], y.sortVals[k]);
+          if (c) return dir * c;
+        }
+        return compareValues(x[tie], y[tie]);
+      };
+    }
+    rowOrder.sort(bySortVals(rowDir, 'key'));
+    pivotKeys.sort(bySortVals(colDir, 'k'));
 
     var truncated = 0;
     if (limit && rowOrder.length > limit) {
@@ -413,7 +437,7 @@
     return {
       pivotKeys: pivotKeys, rows: rowOrder, data: data,
       colorColumn: colorColumnId || null,
-      sortedRowsBy: sortRowId, sortedColumnsBy: sortColId,
+      sortedRowsBy: sortRowIds, sortedColumnsBy: sortColIds,
       totalRows: rowOrder.length + truncated, truncated: truncated
     };
   }

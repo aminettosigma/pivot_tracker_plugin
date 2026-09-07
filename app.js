@@ -11,6 +11,10 @@
       'Check that vendor/react.min.js loads before vendor/sigma-plugin.js.</div>';
     return;
   }
+  // Sort keys are lists now, so diagnostics report them in priority order.
+  function names(ids) {
+    return asArray(ids).map(colName).join(' > ') || '(none)';
+  }
   var client = SDK.client;
 
   client.config.configureEditorPanel([
@@ -28,14 +32,14 @@
       label: 'Cell values',
       description: 'Rendered stacked inside each pill, in order. A column that is constant per pivot value is moved into the column header instead.' },
 
-    { name: 'sortRowColumn', type: 'column', source: 'source', allowMultiple: false,
+    { name: 'sortRowColumn', type: 'column', source: 'source', allowMultiple: true,
       label: 'Sort rows by',
-      description: 'Column that orders the pivot rows. Defaults to the first left column. Order never depends on how Sigma returns the rows, so it survives a control change.' },
-    { name: 'sortRowDesc', type: 'toggle', label: 'Sort rows descending', defaultValue: false },
-    { name: 'sortColumnColumn', type: 'column', source: 'source', allowMultiple: false,
+      description: 'One or more columns that order the pivot rows, in priority order (Batch Id then Plate Id, say). Only columns that exist in the source element appear here -- use "+ Add new column" in this picker to pull in one that is missing. Direction is set by the "Rows: descending" toggle below. Defaults to the first left column.' },
+    { name: 'sortRowDesc', type: 'toggle', label: 'Rows: descending (Z\u2192A, 9\u21920)', defaultValue: false },
+    { name: 'sortColumnColumn', type: 'column', source: 'source', allowMultiple: true,
       label: 'Sort pivot columns by',
-      description: 'Column that orders the crosstab columns -- e.g. a stage sequence number. Defaults to the pivot column\'s own values.' },
-    { name: 'sortColumnDesc', type: 'toggle', label: 'Sort pivot columns descending', defaultValue: false },
+      description: 'One or more columns that order the crosstab columns, in priority order -- e.g. a stage sequence number. Direction is set by the "Pivot columns: descending" toggle below. Defaults to the pivot column\'s own values.' },
+    { name: 'sortColumnDesc', type: 'toggle', label: 'Pivot columns: descending (Z\u2192A, 9\u21920)', defaultValue: false },
 
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
       label: 'Color by column (optional)' },
@@ -461,8 +465,8 @@
       asArray(cfg.valueColumns).join(','), cfg.colorColumn || '',
       maxRows(cfg), requested.join(','),
       // Sorting happens inside build(), so it belongs to the cached result.
-      cfg.sortRowColumn || '', cfg.sortRowDesc ? 'd' : 'a',
-      cfg.sortColumnColumn || '', cfg.sortColumnDesc ? 'd' : 'a'].join('|');
+      cfg.sortRowColumn ? asArray(cfg.sortRowColumn).join(',') : '', cfg.sortRowDesc ? 'd' : 'a',
+      cfg.sortColumnColumn ? asArray(cfg.sortColumnColumn).join(',') : '', cfg.sortColumnDesc ? 'd' : 'a'].join('|');
   }
 
   function maxRows(cfg) {
@@ -499,9 +503,9 @@
     var grid = (layout.rowKey && layout.pivotColumn)
       ? window.PivotDetect.build(layout, cfg.colorColumn, {
         maxRows: maxRows(cfg),
-        sortRow: cfg.sortRowColumn,
+        sortRow: asArray(cfg.sortRowColumn),
         sortRowDesc: !!cfg.sortRowDesc,
-        sortColumn: cfg.sortColumnColumn,
+        sortColumn: asArray(cfg.sortColumnColumn),
         sortColumnDesc: !!cfg.sortColumnDesc
       })
       : { pivotKeys: [], rows: [], totalRows: 0, truncated: 0 };
@@ -637,8 +641,8 @@
         pivotColumn: colName(layout.pivotColumn),
         pivotValues: grid.pivotKeys.length,
         columnAttributes: (layout.columnDims || []).map(colName),
-        rowsSortedBy: colName(grid.sortedRowsBy) + (cfg.sortRowDesc ? ' desc' : ' asc'),
-        columnsSortedBy: colName(grid.sortedColumnsBy) + (cfg.sortColumnDesc ? ' desc' : ' asc'),
+        rowsSortedBy: names(grid.sortedRowsBy) + (cfg.sortRowDesc ? ' desc' : ' asc'),
+        columnsSortedBy: names(grid.sortedColumnsBy) + (cfg.sortColumnDesc ? ' desc' : ' asc'),
         valueColumns: layout.valueColumns.map(colName),
         autoDetected: layout.detected,
         colorColumn: cfg.colorColumn ? colName(cfg.colorColumn) : null,

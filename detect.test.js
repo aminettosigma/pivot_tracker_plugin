@@ -226,6 +226,31 @@ var capOrder = byCap.cols.map(function (v) {
 check('columns ordered by that attribute',
   capOrder, capOrder.slice().sort(function (a, b) { return a - b; }));
 
+console.log('\n--- multi-column sort ---');
+// Plex repeats across plates, so it only orders rows down to ties; the second
+// key has to break them, and the result must match an independent sort.
+var plexOf = {};
+DATA[ID.plate].forEach(function (p, i) { plexOf[p] = DATA[ID.plex][i]; });
+var multi = gridShape(DATA, { sortRow: [ID.plex, ID.plate] });
+// Guard against a vacuous assertion: if every plate shared one plex the first
+// key would be inert and this section would prove nothing.
+check('fixture has more than one plex', Object.keys(plexOf).map(function (p) {
+  return plexOf[p];
+}).filter(function (v, i, a) { return a.indexOf(v) === i; }).length > 1, true);
+var expected = natural.rows.slice().sort(function (a, b) {
+  return PivotDetect.compareValues(plexOf[a], plexOf[b]) ||
+    PivotDetect.compareValues(a, b);
+});
+check('rows ordered by plex then plate', multi.rows, expected);
+check('multi-key order survives shuffling',
+  gridShape(shuffleData(DATA, 91), { sortRow: [ID.plex, ID.plate] }).rows, multi.rows);
+check('descending reverses the whole key list',
+  gridShape(DATA, { sortRow: [ID.plex, ID.plate], sortRowDesc: true }).rows,
+  multi.rows.slice().reverse());
+check('a single id is still accepted', gridShape(DATA, { sortRow: [ID.op] }).rows, byOp.rows);
+check('unstreamed sort ids are dropped, not fatal',
+  gridShape(DATA, { sortRow: ['not-a-column'] }).rows, natural.rows);
+
 console.log('\n--- cap is applied after sorting ---');
 var capped = gridShape(DATA, { maxRows: 5 });
 check('capped rows are the first 5 in sort order', capped.rows, natural.rows.slice(0, 5));
