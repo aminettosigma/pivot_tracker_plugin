@@ -255,6 +255,37 @@ live = Object.assign({}, live, { showValueLabels: false });
 sandbox.__tick();
 check('hidden again when turned off', /grp-sub/.test(root.innerHTML), false);
 
+console.log('\n--- custom color rules must beat the auto palette ---');
+// Mirrors the reported shape: mixed case, spaces and parentheses in the key, and
+// the auto-palette toggle left on. Light theme is forced, because the assertions
+// name a light-palette color and would pass vacuously under the dark palette.
+live = Object.assign({}, live, {
+  darkMode: false,
+  autoPalette: true,
+  colorRules: '{"Completed":"#A36E1F","Pending (late)":"#376692"}'
+});
+sandbox.__tick();
+check('the rule color is in the painted HTML', /#A36E1F/i.test(tbody.innerHTML), true);
+check('the auto palette is not used for a matched value',
+  /#e3edfb/i.test(tbody.innerHTML), false);
+live = Object.assign({}, live, { colorRules: '' });
+sandbox.__tick();
+check('clearing the rules falls back to the palette',
+  /#e3edfb/i.test(tbody.innerHTML), true);
+check('and the rule color is gone', /#A36E1F/i.test(tbody.innerHTML), false);
+
+// Debug reports rule coverage, so an unsaved rules box is diagnosable.
+live = Object.assign({}, live, { debug: true });
+sandbox.__tick();
+check('no rules reported when the box is empty', diag('colorRuleKeys'), 0);
+live = Object.assign({}, live, { colorRules: '{"Completed":"#A36E1F"}' });
+sandbox.__tick();
+check('rule count reported', diag('colorRuleKeys'), 1);
+check('values the rules miss are listed',
+  diagArray('unmatchedByRules'), ['Not Started', 'Pending']);
+live = Object.assign({}, live, { debug: false, colorRules: '' });
+sandbox.__tick();
+
 console.log('\n--- max rows cap ---');
 live = Object.assign({}, live, { maxRows: '25', darkMode: false, compact: false });
 sandbox.__tick();
@@ -286,6 +317,12 @@ sandbox.__tick();
 function diag(field) {
   var m = new RegExp('&quot;' + field + '&quot;: ([^,\n]+)').exec(root.innerHTML);
   return m ? JSON.parse(m[1].replace(/[,\s]+$/, '')) : undefined;
+}
+// Array fields contain commas, so they need the whole bracketed span.
+function diagArray(field) {
+  var m = new RegExp('&quot;' + field + '&quot;: \\[([\\s\\S]*?)\\]').exec(root.innerHTML);
+  if (!m) return undefined;
+  return JSON.parse(('[' + m[1] + ']').replace(/&quot;/g, '"'));
 }
 check('pulled every page', fetchMores >= 2, true);
 check('accumulated all rows, not just page 1', diag('rowsLoaded'), totalLen);
