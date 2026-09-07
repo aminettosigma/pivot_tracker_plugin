@@ -218,7 +218,7 @@
   var noProgress = 0, lastChunkPaint = 0, chunkTimer = null;
   /* Counters for the diagnostics block: they are what distinguishes the plugin
      repainting itself from Sigma re-mounting the iframe underneath it. */
-  var stats = { deliveries: 0, rebuilds: 0, repaints: 0, buffered: 0, frozen: 0 };
+  var stats = { deliveries: 0, rebuilds: 0, repaints: 0, buffered: 0, frozen: 0, padded: 0 };
 
   function setLoading(on) {
     try { client.config.setLoadingState(!!on); } catch (e) { /* older host */ }
@@ -266,6 +266,14 @@
       if (!Array.isArray(target)) target = sink[id] = [];
       // A re-sent page rewinds to its offset rather than duplicating rows.
       if (target.length > offset) target.length = offset;
+      /* And a column that is SHORT of the offset gets padded up to it. Columns are
+         parallel arrays -- row i of Comments must be row i of Plate Id -- so
+         pushing a page onto a column that received fewer values than its siblings
+         would slide every later value of that one column up by the difference.
+         That is what put a card's values under the wrong stage, blanked cards whose
+         values had drifted into a neighbour, and reshuffled which cards looked
+         populated after a write-back changed where the empty values fell. */
+      while (target.length < offset) { target.push(null); stats.padded++; }
       var src = incoming[id] || [];
       for (var i = 0; i < src.length; i++) target.push(src[i]);
     });
@@ -273,6 +281,12 @@
     var loaded = 0;
     Object.keys(sink).forEach(function (id) {
       if (sink[id].length > loaded) loaded = sink[id].length;
+    });
+    // Same reasoning at the tail: a column the page omitted entirely, or one whose
+    // trailing nulls were trimmed, has to end this merge the same length as the
+    // rest or the next page will land on the wrong rows.
+    Object.keys(sink).forEach(function (id) {
+      while (sink[id].length < loaded) { sink[id].push(null); stats.padded++; }
     });
 
     /* Too big to hold two copies: hand the buffer over as the live data (which
@@ -1046,6 +1060,14 @@
         repaints: stats.repaints,
         bufferedReloads: stats.buffered,
         frozenReloads: stats.frozen,
+        /* Non-zero means Sigma delivered pages with columns of unequal length. The
+           values are padded so the columns stay aligned; a large number is worth
+           knowing about because it means the element is streaming ragged pages. */
+        paddedValues: stats.padded,
+        // How many (row, pivot value) pairs had more than one source row. Anything
+        // above zero means the element is not one row per cell, and the pill shows
+        // the richest of those rows.
+        cellsWithMultipleSourceRows: grid.collisions || 0,
         buffering: buffering,
         frozen: frozen,
         gridRows: grid.rows.length,

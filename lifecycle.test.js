@@ -662,5 +662,62 @@ check('same measured cell width', /<col style="width:(\d+)px">/.exec(root.innerH
   widthBefore);
 wrap.clientHeight = 600;
 
+
+console.log('\n--- ragged pages must not shift a column out of alignment ---');
+/* Columns are parallel arrays. If a page delivers fewer values for one column --
+   or omits it entirely -- appending the next page onto it would slide every later
+   value of that column up, putting a card's values under the wrong stage and
+   blanking the cards whose values drifted away. Pad instead. */
+autoSend = false;
+var alignPages = fivePages(small);
+// Page 2 is short by three values for Operator, and omits Witness altogether.
+alignPages[1].data[ID.op] = alignPages[1].data[ID.op].slice(0, -3);
+delete alignPages[1].data[ID.wit];
+pages = alignPages;
+pager = null;
+setConfig({ source: 'el-ragged', rowColumns: [ID.plate, ID.plex], pivotColumn: ID.stage,
+  valueColumns: [ID.ts, ID.op], colorColumn: ID.status, maxRows: '0', debug: true,
+  sortRowColumn: [], sortRowDesc: false, sortColumnColumn: [], sortColumnDesc: false });
+while (pager.next < pages.length) pager.send();
+
+check('padding was needed and recorded', diag('paddedValues') > 0, true);
+
+/* The real check: every plate/stage pair that the *source* says is populated must
+   still be populated on screen, and with the same operator. Rebuild the truth
+   directly from the fixture and compare against the rendered grid. */
+/* Truth comes from re-assembling the pages the same way a correct reader would --
+   pad each column to the page offset, then append -- so the three Operator values
+   the ragged page never sent are absent from both sides of the comparison. */
+var assembled = {};
+alignPages.forEach(function (pg) {
+  smallCols.forEach(function (k) {
+    if (!assembled[k]) assembled[k] = [];
+    while (assembled[k].length < pg.offset) assembled[k].push(null);
+    (pg.data[k] || []).forEach(function (v) { assembled[k].push(v); });
+  });
+});
+var truth = {};
+for (var i = 0; i < assembled[ID.plate].length; i++) {
+  var op = assembled[ID.op][i];
+  if (op === null || op === undefined || op === '') continue;
+  truth[assembled[ID.plate][i] + '\u0001' + assembled[ID.stage][i]] = String(op);
+}
+wrap.clientHeight = 4000;                       // render every row in one window
+wrap.scrollTop = 0;
+wrap.fire('scroll', {});
+var wrong = [], checked = 0;
+Object.keys(truth).forEach(function (k) {
+  var parts = k.split('\u0001');
+  var re = new RegExp('data-row="' + parts[0] + '" data-col="' + parts[1] +
+    '">([\\s\\S]*?)</button>');
+  var m = re.exec(tbody.innerHTML);
+  checked++;
+  if (!m || m[1].indexOf(truth[k]) === -1) wrong.push(k);
+});
+check('every populated cell was checked', checked, Object.keys(truth).length);
+check('no cell lost or misplaced its operator after ragged pages', wrong, []);
+wrap.clientHeight = 600;
+autoSend = true;
+
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

@@ -275,40 +275,21 @@ check('picking it explicitly makes it visible again',
     pivotColumn: ID.stage, valueColumns: [ID.op, ID.cap], excludeColumns: []
   }).columnDims.indexOf(ID.cap) !== -1, true);
 
-console.log('\n--- explicit pivot column order ---');
-var stages = natural.cols.slice();
-// A hand-picked order that no column encodes: reverse, then move the middle
-// stage to the front, so neither collation nor any attribute reproduces it.
-var wanted = stages.slice().reverse();
-wanted.unshift(wanted.splice(Math.floor(wanted.length / 2), 1)[0]);
-check('follows the listed order exactly',
-  gridShape(DATA, { pivotOrder: wanted.join(', ') }).cols, wanted);
-check('order is not something a sort could produce',
-  wanted.join() !== stages.join() && wanted.join() !== stages.slice().reverse().join(), true);
-check('case and spacing are ignored',
-  gridShape(DATA, { pivotOrder: '  ' + wanted.join(' ,  ').toLowerCase() + ' ' }).cols, wanted);
-check('newlines separate too',
-  gridShape(DATA, { pivotOrder: wanted.join('\n') }).cols, wanted);
-var partial = gridShape(DATA, { pivotOrder: stages[3] + ', ' + stages[1] }).cols;
-check('listed columns come first', partial.slice(0, 2), [stages[3], stages[1]]);
-check('unlisted columns keep their sort and go last',
-  partial.slice(2), stages.filter(function (s) { return s !== stages[3] && s !== stages[1]; }));
-check('no columns are lost', partial.length, stages.length);
-check('an empty list falls back to the normal sort',
-  gridShape(DATA, { pivotOrder: '  ,  ' }).cols, natural.cols);
-check('a name that matches nothing is ignored',
-  gridShape(DATA, { pivotOrder: 'NOT A STAGE' }).cols, natural.cols);
-check('order survives shuffling',
-  gridShape(shuffleData(DATA, 33), { pivotOrder: wanted.join(', ') }).cols, wanted);
-check('it overrides a sort column',
-  gridShape(DATA, { pivotOrder: wanted.join(', '), sortColumn: [ID.cap] }).cols, wanted);
-/* Reordering headers must not shift the cells under them: check every (plate,
-   stage) pair against a lookup built straight from the source arrays. */
+console.log('\n--- sorting headers must not shift the cells under them ---');
+/* Order the crosstab columns by an attribute so the headers land far from their
+   natural order, then check every (plate, stage) pair against a lookup built
+   straight from the source arrays. */
 var reordered = PivotDetect.build(PivotDetect.detect(DATA, COLUMNS, {
-  rowColumns: [ID.plate], pivotColumn: ID.stage, valueColumns: [ID.op]
-}), null, { pivotOrder: wanted.join(', ') });
+  rowColumns: [ID.plate], pivotColumn: ID.stage, valueColumns: [ID.op],
+  excludeColumns: [ID.cap]
+}), null, { sortColumn: [ID.cap] });
+check('headers really did move', reordered.pivotKeys.map(function (pk) {
+  return pk.value;
+}).join() !== natural.cols.join(), true);
 var truth = {};
-DATA[ID.plate].forEach(function (p, i) { truth[p + '\u0001' + DATA[ID.stage][i]] = DATA[ID.op][i]; });
+DATA[ID.plate].forEach(function (p, i) {
+  truth[p + '\u0001' + DATA[ID.stage][i]] = DATA[ID.op][i];
+});
 var mismatches = 0, compared = 0;
 reordered.rows.forEach(function (r) {
   var plate = DATA[ID.plate][r.index];
@@ -328,6 +309,50 @@ var capped = gridShape(DATA, { maxRows: 5 });
 check('capped rows are the first 5 in sort order', capped.rows, natural.rows.slice(0, 5));
 var cappedShuffled = gridShape(shuffleData(DATA, 31), { maxRows: 5 });
 check('cap keeps the same rows regardless of arrival', cappedShuffled.rows, capped.rows);
+
+
+console.log('\n--- a duplicated (row, stage) pair must show the richest row ---');
+/* An extra attempt or step row splits one stage into several source rows. Which one
+   the card shows used to depend on the order Snowflake returned them, so a card
+   could show an empty duplicate one minute and the real data the next. */
+function withDuplicate(emptyFirst) {
+  var d = {};
+  Object.keys(DATA).forEach(function (k) { d[k] = DATA[k].slice(); });
+  // Find a populated (plate, stage) pair and append a second, value-less row for it.
+  var at = -1;
+  for (var i = 0; i < d[ID.plate].length; i++) {
+    if (d[ID.op][i] !== null && d[ID.op][i] !== undefined && d[ID.op][i] !== '') { at = i; break; }
+  }
+  var rich = {}, poor = {};
+  Object.keys(d).forEach(function (k) { rich[k] = d[k][at]; poor[k] = null; });
+  poor[ID.plate] = rich[ID.plate]; poor[ID.plex] = rich[ID.plex];
+  poor[ID.batch] = rich[ID.batch]; poor[ID.stage] = rich[ID.stage];
+  // Rewrite that pair as two rows, in the requested order.
+  Object.keys(d).forEach(function (k) {
+    d[k][at] = emptyFirst ? poor[k] : rich[k];
+    d[k].push(emptyFirst ? rich[k] : poor[k]);
+  });
+  return { data: d, plate: rich[ID.plate], stage: rich[ID.stage], op: rich[ID.op] };
+}
+function cellOp(bundle) {
+  var scoped = {}, scopedCols = {};
+  [ID.plate, ID.plex, ID.batch, ID.stage, ID.ts, ID.op, ID.wit, ID.status, ID.cap]
+    .forEach(function (id) { scoped[id] = bundle.data[id]; scopedCols[id] = COLUMNS[id]; });
+  var lay = PivotDetect.detect(scoped, scopedCols, {
+    rowColumns: [ID.plate, ID.plex, ID.batch], pivotColumn: ID.stage,
+    valueColumns: [ID.ts, ID.op, ID.wit], excludeColumns: [ID.status]
+  });
+  var g = PivotDetect.build(lay, ID.status, {});
+  var row = g.rows.filter(function (r) { return bundle.data[ID.plate][r.index] === bundle.plate; })[0];
+  var pk = g.pivotKeys.filter(function (k) { return k.value === bundle.stage; })[0];
+  var ri = row.cells[pk.index];
+  return { op: ri === undefined ? null : bundle.data[ID.op][ri], collisions: g.collisions };
+}
+var richLast = withDuplicate(true), richFirst = withDuplicate(false);
+check('the collision was counted', cellOp(richLast).collisions >= 1, true);
+check('the populated row wins when it arrives last', cellOp(richLast).op, richLast.op);
+check('and when it arrives first', cellOp(richFirst).op, richFirst.op);
+check('so arrival order cannot change the card', cellOp(richLast).op, cellOp(richFirst).op);
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

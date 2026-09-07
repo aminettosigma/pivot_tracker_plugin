@@ -327,27 +327,6 @@
     return list.length ? list : [fallback];
   }
 
-  /* An explicit column order, given as names rather than a column to sort by.
-     This is the only way to reproduce a hand-picked order in the source pivot,
-     since the SDK exposes no sort metadata to read it from. Listed values come
-     first in the order given; anything unlisted keeps its normal sort and falls
-     to the end, so a new stage appearing in the data is visible, not dropped. */
-  function orderRanks(spec) {
-    var list = Array.isArray(spec) ? spec : String(spec == null ? '' : spec).split(/[,\n]/);
-    var ranks = new Map();
-    for (var i = 0; i < list.length; i++) {
-      var name = String(list[i]).trim().toLowerCase();
-      if (name && !ranks.has(name)) ranks.set(name, ranks.size);
-    }
-    return ranks.size ? ranks : null;
-  }
-
-  function rankOf(ranks, value) {
-    if (value === null || value === undefined) return -1;
-    var r = ranks.get(String(value).trim().toLowerCase());
-    return r === undefined ? -1 : r;
-  }
-
   /** Build the ordered pivot grid from a detect() result.
    *
    *  Rows and cells hold *source row indices*, not copied values: a cell is the
@@ -440,18 +419,7 @@
       };
     }
     rowOrder.sort(bySortVals(rowDir, 'key'));
-    var colRanks = orderRanks(opts.pivotOrder);
-    if (colRanks) {
-      var byVals = bySortVals(colDir, 'k');
-      pivotKeys.sort(function (x, y) {
-        var rx = rankOf(colRanks, x.value), ry = rankOf(colRanks, y.value);
-        if (rx !== -1 && ry !== -1) return colDir * (rx - ry);
-        if (rx !== -1 || ry !== -1) return rx !== -1 ? -1 : 1;   // unlisted last
-        return byVals(x, y);
-      });
-    } else {
-      pivotKeys.sort(bySortVals(colDir, 'k'));
-    }
+    pivotKeys.sort(bySortVals(colDir, 'k'));
 
     var truncated = 0;
     if (limit && rowOrder.length > limit) {
@@ -459,22 +427,55 @@
       rowOrder.length = limit;
     }
 
-    // Pass 2: fill cells for the rows that survived, keyed by each column's
-    // original slot so sorting the headers cannot desynchronize the cells.
+    /* Pass 2: fill cells for the rows that survived, keyed by each column's
+       original slot so sorting the headers cannot desynchronize the cells.
+
+       An element is not guaranteed to hold one row per (row key, pivot value): an
+       extra attempt, step or execution id splits a stage into several rows. This
+       used to be last-write-wins, so which of them the card showed depended on the
+       order Snowflake happened to return -- and if the winner had no operator,
+       times or comment, the card rendered empty even though the data was there.
+       That is the "card vanishes, then reappears" behavior. Pick deterministically
+       instead: the row carrying the most values wins, and an exact tie is broken by
+       comparing the values themselves, never by arrival order. */
     var keep = new Map();
     for (var r = 0; r < rowOrder.length; r++) keep.set(mapKey(rawKeyOf(keyArr, rowOrder[r].index)), rowOrder[r]);
 
+    var scoreCols = (layout.valueColumns || []).concat(colorColumnId ? [colorColumnId] : []);
+    var scoreArrs = scoreCols.map(function (id) { return data[id] || []; });
+    function filled(i) {
+      var s = 0;
+      for (var k = 0; k < scoreArrs.length; k++) {
+        var v = scoreArrs[k][i];
+        if (v !== null && v !== undefined && v !== '') s++;
+      }
+      return s;
+    }
+    // Only built for a pair that actually collides, so the common case pays nothing.
+    function tiebreak(i) {
+      var parts = [];
+      for (var k = 0; k < scoreArrs.length; k++) parts.push(key(scoreArrs[k][i]));
+      return parts.join('\u0001');
+    }
+
+    var collisions = 0;
     for (var j = 0; j < n; j++) {
       var target = keep.get(mapKey(keyArr ? keyArr[j] : null));
       if (target === undefined) continue;
       var slot = pivotIndex.get(mapKey(pivotArr ? pivotArr[j] : null));
-      if (slot !== undefined) target.cells[slot] = j;
+      if (slot === undefined) continue;
+      var held = target.cells[slot];
+      if (held === undefined) { target.cells[slot] = j; continue; }
+      collisions++;
+      var a = filled(held), b = filled(j);
+      if (b > a || (b === a && tiebreak(j) < tiebreak(held))) target.cells[slot] = j;
     }
 
     return {
       pivotKeys: pivotKeys, rows: rowOrder, data: data,
       colorColumn: colorColumnId || null,
       sortedRowsBy: sortRowIds, sortedColumnsBy: sortColIds,
+      collisions: collisions,
       totalRows: rowOrder.length + truncated, truncated: truncated
     };
   }
