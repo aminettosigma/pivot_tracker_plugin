@@ -327,6 +327,27 @@
     return list.length ? list : [fallback];
   }
 
+  /* An explicit column order, given as names rather than a column to sort by.
+     This is the only way to reproduce a hand-picked order in the source pivot,
+     since the SDK exposes no sort metadata to read it from. Listed values come
+     first in the order given; anything unlisted keeps its normal sort and falls
+     to the end, so a new stage appearing in the data is visible, not dropped. */
+  function orderRanks(spec) {
+    var list = Array.isArray(spec) ? spec : String(spec == null ? '' : spec).split(/[,\n]/);
+    var ranks = new Map();
+    for (var i = 0; i < list.length; i++) {
+      var name = String(list[i]).trim().toLowerCase();
+      if (name && !ranks.has(name)) ranks.set(name, ranks.size);
+    }
+    return ranks.size ? ranks : null;
+  }
+
+  function rankOf(ranks, value) {
+    if (value === null || value === undefined) return -1;
+    var r = ranks.get(String(value).trim().toLowerCase());
+    return r === undefined ? -1 : r;
+  }
+
   /** Build the ordered pivot grid from a detect() result.
    *
    *  Rows and cells hold *source row indices*, not copied values: a cell is the
@@ -419,7 +440,18 @@
       };
     }
     rowOrder.sort(bySortVals(rowDir, 'key'));
-    pivotKeys.sort(bySortVals(colDir, 'k'));
+    var colRanks = orderRanks(opts.pivotOrder);
+    if (colRanks) {
+      var byVals = bySortVals(colDir, 'k');
+      pivotKeys.sort(function (x, y) {
+        var rx = rankOf(colRanks, x.value), ry = rankOf(colRanks, y.value);
+        if (rx !== -1 && ry !== -1) return colDir * (rx - ry);
+        if (rx !== -1 || ry !== -1) return rx !== -1 ? -1 : 1;   // unlisted last
+        return byVals(x, y);
+      });
+    } else {
+      pivotKeys.sort(bySortVals(colDir, 'k'));
+    }
 
     var truncated = 0;
     if (limit && rowOrder.length > limit) {

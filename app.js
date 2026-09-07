@@ -40,6 +40,10 @@
       label: 'Sort pivot columns by',
       description: 'One or more columns that order the crosstab columns, in priority order -- e.g. Stage Seq. A column used only for sorting is not displayed anywhere: it does not become a header attribute or a pill value, so Stage Seq can order the stages without showing up. Direction is set by the "Pivot columns: descending" toggle below.' },
     { name: 'sortColumnDesc', type: 'toggle', label: 'Pivot columns: descending (Z\u2192A, 9\u21920)', defaultValue: false },
+    { name: 'pivotOrder', type: 'text', multiline: true,
+      label: 'Pivot column order (optional)',
+      placeholder: 'PLATING, 1ST SS, 2ND SS',
+      description: 'Exact order for the crosstab columns, by name, separated by commas or new lines. Use this when the order is one you picked by hand in the source pivot, so no column encodes it. Matching ignores case and surrounding spaces. Columns not listed keep their normal sort and go to the end, so a new stage still shows up. Overrides "Sort pivot columns by".' },
 
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
       label: 'Color by column (optional)' },
@@ -483,7 +487,8 @@
       maxRows(cfg), requested.join(','),
       // Sorting happens inside build(), so it belongs to the cached result.
       cfg.sortRowColumn ? asArray(cfg.sortRowColumn).join(',') : '', cfg.sortRowDesc ? 'd' : 'a',
-      cfg.sortColumnColumn ? asArray(cfg.sortColumnColumn).join(',') : '', cfg.sortColumnDesc ? 'd' : 'a'].join('|');
+      cfg.sortColumnColumn ? asArray(cfg.sortColumnColumn).join(',') : '', cfg.sortColumnDesc ? 'd' : 'a',
+      cfg.pivotOrder || ''].join('|');
   }
 
   function maxRows(cfg) {
@@ -523,6 +528,7 @@
         sortRow: asArray(cfg.sortRowColumn),
         sortRowDesc: !!cfg.sortRowDesc,
         sortColumn: asArray(cfg.sortColumnColumn),
+        pivotOrder: cfg.pivotOrder || '',
         sortColumnDesc: !!cfg.sortColumnDesc
       })
       : { pivotKeys: [], rows: [], totalRows: 0, truncated: 0 };
@@ -661,7 +667,9 @@
         pivotValues: grid.pivotKeys.length,
         columnAttributes: (layout.columnDims || []).map(colName),
         rowsSortedBy: names(grid.sortedRowsBy) + (cfg.sortRowDesc ? ' desc' : ' asc'),
-        columnsSortedBy: names(grid.sortedColumnsBy) + (cfg.sortColumnDesc ? ' desc' : ' asc'),
+        columnsSortedBy: cfg.pivotOrder
+          ? 'explicit order list'
+          : names(grid.sortedColumnsBy) + (cfg.sortColumnDesc ? ' desc' : ' asc'),
         valueColumns: layout.valueColumns.map(colName),
         autoDetected: layout.detected,
         colorColumn: cfg.colorColumn ? colName(cfg.colorColumn) : null,

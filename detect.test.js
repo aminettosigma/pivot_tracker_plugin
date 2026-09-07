@@ -275,6 +275,54 @@ check('picking it explicitly makes it visible again',
     pivotColumn: ID.stage, valueColumns: [ID.op, ID.cap], excludeColumns: []
   }).columnDims.indexOf(ID.cap) !== -1, true);
 
+console.log('\n--- explicit pivot column order ---');
+var stages = natural.cols.slice();
+// A hand-picked order that no column encodes: reverse, then move the middle
+// stage to the front, so neither collation nor any attribute reproduces it.
+var wanted = stages.slice().reverse();
+wanted.unshift(wanted.splice(Math.floor(wanted.length / 2), 1)[0]);
+check('follows the listed order exactly',
+  gridShape(DATA, { pivotOrder: wanted.join(', ') }).cols, wanted);
+check('order is not something a sort could produce',
+  wanted.join() !== stages.join() && wanted.join() !== stages.slice().reverse().join(), true);
+check('case and spacing are ignored',
+  gridShape(DATA, { pivotOrder: '  ' + wanted.join(' ,  ').toLowerCase() + ' ' }).cols, wanted);
+check('newlines separate too',
+  gridShape(DATA, { pivotOrder: wanted.join('\n') }).cols, wanted);
+var partial = gridShape(DATA, { pivotOrder: stages[3] + ', ' + stages[1] }).cols;
+check('listed columns come first', partial.slice(0, 2), [stages[3], stages[1]]);
+check('unlisted columns keep their sort and go last',
+  partial.slice(2), stages.filter(function (s) { return s !== stages[3] && s !== stages[1]; }));
+check('no columns are lost', partial.length, stages.length);
+check('an empty list falls back to the normal sort',
+  gridShape(DATA, { pivotOrder: '  ,  ' }).cols, natural.cols);
+check('a name that matches nothing is ignored',
+  gridShape(DATA, { pivotOrder: 'NOT A STAGE' }).cols, natural.cols);
+check('order survives shuffling',
+  gridShape(shuffleData(DATA, 33), { pivotOrder: wanted.join(', ') }).cols, wanted);
+check('it overrides a sort column',
+  gridShape(DATA, { pivotOrder: wanted.join(', '), sortColumn: [ID.cap] }).cols, wanted);
+/* Reordering headers must not shift the cells under them: check every (plate,
+   stage) pair against a lookup built straight from the source arrays. */
+var reordered = PivotDetect.build(PivotDetect.detect(DATA, COLUMNS, {
+  rowColumns: [ID.plate], pivotColumn: ID.stage, valueColumns: [ID.op]
+}), null, { pivotOrder: wanted.join(', ') });
+var truth = {};
+DATA[ID.plate].forEach(function (p, i) { truth[p + '\u0001' + DATA[ID.stage][i]] = DATA[ID.op][i]; });
+var mismatches = 0, compared = 0;
+reordered.rows.forEach(function (r) {
+  var plate = DATA[ID.plate][r.index];
+  reordered.pivotKeys.forEach(function (pk) {
+    var ri = r.cells[pk.index];
+    if (ri === undefined) return;
+    compared++;
+    if (DATA[ID.op][ri] !== truth[plate + '\u0001' + pk.value]) mismatches++;
+  });
+});
+check('every cell still pairs with the right column', mismatches, 0);
+check('and every populated cell in the fixture was compared',
+  compared, Object.keys(truth).length);
+
 console.log('\n--- cap is applied after sorting ---');
 var capped = gridShape(DATA, { maxRows: 5 });
 check('capped rows are the first 5 in sort order', capped.rows, natural.rows.slice(0, 5));
