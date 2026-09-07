@@ -269,24 +269,90 @@
     return result;
   }
 
+  /* One cached collator. String.prototype.localeCompare constructs a collator per
+     call, which turned a 400 ms build into 13 s at 2M rows. */
+  var COLLATOR = (typeof Intl !== 'undefined' && Intl.Collator)
+    ? new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+    : null;
+
+  /* Total order over cell values. Ordering must never depend on the order rows
+     happen to arrive in: Sigma re-runs the element query whenever a control
+     changes, and SQL without ORDER BY returns rows in whatever order it likes. */
+  function compareValues(a, b) {
+    var an = a === null || a === undefined || a === '';
+    var bn = b === null || b === undefined || b === '';
+    if (an || bn) return an ? (bn ? 0 : 1) : -1;      // blanks last
+    if (a instanceof Date) a = a.getTime();
+    if (b instanceof Date) b = b.getTime();
+
+    if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : (a > b ? 1 : 0);
+
+    var na = typeof a === 'number' ? a : (isFinite(Number(a)) ? Number(a) : null);
+    var nb = typeof b === 'number' ? b : (isFinite(Number(b)) ? Number(b) : null);
+    if (na !== null && nb !== null) return na < nb ? -1 : (na > nb ? 1 : 0);
+
+    var sa = String(a), sb = String(b);
+    if (sa === sb) return 0;
+    // numeric collation so A2 sorts before A10, matching how people read plate IDs.
+    var c = COLLATOR ? COLLATOR.compare(sa, sb) : (sa < sb ? -1 : 1);
+    if (c) return c;
+    return sa < sb ? -1 : (sa > sb ? 1 : 0);
+  }
+
+  /* Picking the minimum only needs *a* deterministic order, not a human-friendly
+     one, so it avoids collation entirely -- this runs once per source row. */
+  function lower(a, b) {
+    if (a === b) return false;
+    var an = a === null || a === undefined || a === '';
+    var bn = b === null || b === undefined || b === '';
+    if (an || bn) return !an;
+    var ta = typeof a, tb = typeof b;
+    if (ta === 'number' && tb === 'number') return a < b;
+    if (ta === tb) return a < b;
+    return String(a) < String(b);
+  }
+
   /** Build the ordered pivot grid from a detect() result.
    *
    *  Rows and cells hold *source row indices*, not copied values: a cell is the
    *  integer index its data lives at, so the renderer reads `data[colId][index]`
    *  on demand. At 1M source rows the previous shape allocated ~2M objects here.
    *
-   *  @param maxRows optional cap on output rows; 0/undefined means unlimited. */
-  function build(layout, colorColumnId, maxRows) {
+   *  Row and column order come from `opts.sortRow` / `opts.sortColumn` (defaulting
+   *  to the row key and the pivot column), never from arrival order.
+   *
+   *  @param opts { maxRows, sortRow, sortRowDesc, sortColumn, sortColumnDesc }
+   */
+  function build(layout, colorColumnId, opts) {
+    // Back-compat: build(layout, color, 5000) still means a row cap.
+    if (typeof opts === 'number') opts = { maxRows: opts };
+    opts = opts || {};
+
     var data = layout.data || {};
     var n = layout.rowCount || 0;
-    var limit = maxRows > 0 ? maxRows : 0;
+    var limit = opts.maxRows > 0 ? opts.maxRows : 0;
+
+    var sortRowId = Array.isArray(data[opts.sortRow]) ? opts.sortRow : layout.rowKey;
+    var sortColId = Array.isArray(data[opts.sortColumn]) ? opts.sortColumn : layout.pivotColumn;
+    var rowDir = opts.sortRowDesc ? -1 : 1;
+    var colDir = opts.sortColumnDesc ? -1 : 1;
+
+    var sortRowArr = data[sortRowId] || [];
+    var sortColArr = data[sortColId] || [];
+    /* When the sort column *is* the dimension, every occurrence carries the same
+       value, so the per-row minimum is a no-op and can be skipped -- that is the
+       default path and it keeps build() free of comparisons. */
+    var rowNeedsMin = sortRowId !== layout.rowKey;
+    var colNeedsMin = sortColId !== layout.pivotColumn;
 
     var pivotKeys = [], pivotIndex = new Map();
     var rowOrder = [], rowIndex = new Map();
     var columnDims = layout.columnDims || [];
     var pivotArr = data[layout.pivotColumn], keyArr = data[layout.rowKey];
-    var truncated = 0;
 
+    /* Pass 1: discover the distinct rows and columns with their sort values. Sort
+       values are the MIN over every occurrence, so they do not depend on which
+       source row happened to be seen first. */
     for (var i = 0; i < n; i++) {
       var pv = pivotArr ? pivotArr[i] : null;
       var pmk = mapKey(pv);
@@ -298,33 +364,64 @@
         }
         ci = pivotKeys.length;
         pivotIndex.set(pmk, ci);
-        pivotKeys.push({ k: key(pv), value: pv, attrs: attrs, index: ci });
+        pivotKeys.push({ k: key(pv), value: pv, attrs: attrs, index: ci,
+          sortVal: sortColArr[i] });
+      } else if (colNeedsMin) {
+        var pcur = pivotKeys[ci];
+        if (lower(sortColArr[i], pcur.sortVal)) pcur.sortVal = sortColArr[i];
       }
 
-      var rmk = mapKey(keyArr ? keyArr[i] : null);
+      var rv = keyArr ? keyArr[i] : null;
+      var rmk = mapKey(rv);
       var row = rowIndex.get(rmk);
       if (row === undefined) {
-        // Past the cap, keep counting distinct rows for the "showing N of M" note
-        // but stop building them.
-        if (limit && rowOrder.length >= limit) { rowIndex.set(rmk, null); truncated++; continue; }
-        row = { key: key(keyArr ? keyArr[i] : null), index: i, cells: [] };
+        row = { key: key(rv), index: i, cells: [], sortVal: sortRowArr[i] };
         rowIndex.set(rmk, row);
         rowOrder.push(row);
-      } else if (row === null) {
-        continue;
+      } else if (rowNeedsMin) {
+        if (lower(sortRowArr[i], row.sortVal)) row.sortVal = sortRowArr[i];
       }
+    }
 
-      row.cells[ci] = i;
+    // Sort before capping, so the cap keeps the first N rows *in sort order* --
+    // otherwise which rows survive would depend on arrival order too.
+    rowOrder.sort(function (x, y) {
+      return rowDir * compareValues(x.sortVal, y.sortVal) || compareValues(x.key, y.key);
+    });
+    pivotKeys.sort(function (x, y) {
+      return colDir * compareValues(x.sortVal, y.sortVal) || compareValues(x.k, y.k);
+    });
+
+    var truncated = 0;
+    if (limit && rowOrder.length > limit) {
+      truncated = rowOrder.length - limit;
+      rowOrder.length = limit;
+    }
+
+    // Pass 2: fill cells for the rows that survived, keyed by each column's
+    // original slot so sorting the headers cannot desynchronize the cells.
+    var keep = new Map();
+    for (var r = 0; r < rowOrder.length; r++) keep.set(mapKey(rawKeyOf(keyArr, rowOrder[r].index)), rowOrder[r]);
+
+    for (var j = 0; j < n; j++) {
+      var target = keep.get(mapKey(keyArr ? keyArr[j] : null));
+      if (target === undefined) continue;
+      var slot = pivotIndex.get(mapKey(pivotArr ? pivotArr[j] : null));
+      if (slot !== undefined) target.cells[slot] = j;
     }
 
     return {
       pivotKeys: pivotKeys, rows: rowOrder, data: data,
       colorColumn: colorColumnId || null,
+      sortedRowsBy: sortRowId, sortedColumnsBy: sortColId,
       totalRows: rowOrder.length + truncated, truncated: truncated
     };
   }
 
+  function rawKeyOf(arr, index) { return arr ? arr[index] : null; }
+
   global.PivotDetect = {
-    detect: detect, build: build, toRows: toRows, key: key, rowCount: rowCount
+    detect: detect, build: build, toRows: toRows, key: key, rowCount: rowCount,
+    compareValues: compareValues
   };
 })(window);

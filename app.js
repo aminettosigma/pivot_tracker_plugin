@@ -28,6 +28,15 @@
       label: 'Cell values',
       description: 'Rendered stacked inside each pill, in order. A column that is constant per pivot value is moved into the column header instead.' },
 
+    { name: 'sortRowColumn', type: 'column', source: 'source', allowMultiple: false,
+      label: 'Sort rows by',
+      description: 'Column that orders the pivot rows. Defaults to the first left column. Order never depends on how Sigma returns the rows, so it survives a control change.' },
+    { name: 'sortRowDesc', type: 'toggle', label: 'Sort rows descending', defaultValue: false },
+    { name: 'sortColumnColumn', type: 'column', source: 'source', allowMultiple: false,
+      label: 'Sort pivot columns by',
+      description: 'Column that orders the crosstab columns -- e.g. a stage sequence number. Defaults to the pivot column\'s own values.' },
+    { name: 'sortColumnDesc', type: 'toggle', label: 'Sort pivot columns descending', defaultValue: false },
+
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
       label: 'Color by column (optional)' },
     { name: 'colorRules', type: 'text', multiline: true,
@@ -107,7 +116,8 @@
     var out = [];
     [asArray(cfg.rowColumns), asArray(cfg.pivotColumn),
      asArray(cfg.valueColumns), asArray(cfg.colorColumn),
-     asArray(cfg.rowValueColumn), asArray(cfg.columnValueColumn)].forEach(function (group) {
+     asArray(cfg.rowValueColumn), asArray(cfg.columnValueColumn),
+     asArray(cfg.sortRowColumn), asArray(cfg.sortColumnColumn)].forEach(function (group) {
       group.forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
     });
     return out;
@@ -358,7 +368,7 @@
     for (var i = 0; i < n; i++) {
       var cells = grid.rows[i].cells;
       for (var c = 0; c < grid.pivotKeys.length; c++) {
-        var ri = cells[c];
+        var ri = cells[grid.pivotKeys[c].index];
         if (ri === undefined) continue;
         for (var v = 0; v < layout.valueColumns.length; v++) {
           var vid = layout.valueColumns[v];
@@ -449,7 +459,10 @@
   function structuralSig(cfg, requested) {
     return [cfg.source, asArray(cfg.rowColumns).join(','), cfg.pivotColumn || '',
       asArray(cfg.valueColumns).join(','), cfg.colorColumn || '',
-      maxRows(cfg), requested.join(',')].join('|');
+      maxRows(cfg), requested.join(','),
+      // Sorting happens inside build(), so it belongs to the cached result.
+      cfg.sortRowColumn || '', cfg.sortRowDesc ? 'd' : 'a',
+      cfg.sortColumnColumn || '', cfg.sortColumnDesc ? 'd' : 'a'].join('|');
   }
 
   function maxRows(cfg) {
@@ -484,7 +497,13 @@
     });
 
     var grid = (layout.rowKey && layout.pivotColumn)
-      ? window.PivotDetect.build(layout, cfg.colorColumn, maxRows(cfg))
+      ? window.PivotDetect.build(layout, cfg.colorColumn, {
+        maxRows: maxRows(cfg),
+        sortRow: cfg.sortRowColumn,
+        sortRowDesc: !!cfg.sortRowDesc,
+        sortColumn: cfg.sortColumnColumn,
+        sortColumnDesc: !!cfg.sortColumnDesc
+      })
       : { pivotKeys: [], rows: [], totalRows: 0, truncated: 0 };
 
     memo = { data: state.data, columns: state.columns, sig: sig, layout: layout,
@@ -618,6 +637,8 @@
         pivotColumn: colName(layout.pivotColumn),
         pivotValues: grid.pivotKeys.length,
         columnAttributes: (layout.columnDims || []).map(colName),
+        rowsSortedBy: colName(grid.sortedRowsBy) + (cfg.sortRowDesc ? ' desc' : ' asc'),
+        columnsSortedBy: colName(grid.sortedColumnsBy) + (cfg.sortColumnDesc ? ' desc' : ' asc'),
         valueColumns: layout.valueColumns.map(colName),
         autoDetected: layout.detected,
         colorColumn: cfg.colorColumn ? colName(cfg.colorColumn) : null,
@@ -712,8 +733,9 @@
 
     for (var c = 0; c < view.grid.pivotKeys.length; c++) {
       var pk = view.grid.pivotKeys[c];
-      // Cells hold the source row index; values are read from the columns on demand.
-      var ri = row.cells[c];
+      // Cells are keyed by each column's original slot, so sorting the headers
+      // cannot pair a cell with the wrong column.
+      var ri = row.cells[pk.index];
       if (ri === undefined) { html.push('<td class="cell empty"></td>'); continue; }
 
       var hasValue = false;

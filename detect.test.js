@@ -74,7 +74,11 @@ var b = run(Object.assign({}, base, { valueColumns: [ID.ts, ID.op, ID.wit, ID.ca
 check('columnAttributes', names(b.columnDims), ['Stage Capacity']);
 check('valueColumns exclude capacity', names(b.valueColumns), ['Stage Timestamp', 'Operator', 'Witness']);
 var grid = PivotDetect.build(b, ID.status);
-check('header carries capacity attr', grid.pivotKeys[0].attrs[ID.cap], 80);
+// Columns are sorted now, so look the stage up by name rather than by position.
+function pkFor(g, value) {
+  return g.pivotKeys.filter(function (pk) { return pk.value === value; })[0];
+}
+check('header carries capacity attr', pkFor(grid, 'PLATING').attrs[ID.cap], 80);
 check('pivot value count', grid.pivotKeys.length, 13);
 check('row count', grid.rows.length, 6);
 // Cells are source row indices now, so the value columns are read from the data.
@@ -149,6 +153,84 @@ check('presence key beside "values" also works',
   bg(null, '{"values":{"Done":"#1d3a5c"},"isnull":"#abcdef"}'), '#abcdef');
 check('no rules, null -> neutral', bg(null, ''), PC.NEUTRAL.bg);
 check('neutral is distinct from test colors', PC.NEUTRAL.bg !== '#abcdef', true);
+
+console.log('\n--- deterministic order (the click-scramble bug) ---');
+/* Sigma re-runs the element query on every control change, and SQL without
+   ORDER BY may return rows in a different order each time. Shuffling the source
+   rows must not change the rendered grid at all. */
+function shuffleData(data, seed) {
+  var ids = Object.keys(data);
+  var n = data[ids[0]].length;
+  var order = [];
+  for (var i = 0; i < n; i++) order.push(i);
+  // deterministic LCG shuffle so the test is repeatable
+  var s = seed;
+  for (var j = n - 1; j > 0; j--) {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    var k = s % (j + 1);
+    var t = order[j]; order[j] = order[k]; order[k] = t;
+  }
+  var out = {};
+  ids.forEach(function (id) {
+    out[id] = order.map(function (idx) { return data[id][idx]; });
+  });
+  return out;
+}
+
+function gridShape(data, opts) {
+  var scoped = {}, scopedCols = {};
+  [ID.plate, ID.plex, ID.batch, ID.stage, ID.ts, ID.op, ID.wit, ID.status, ID.cap]
+    .forEach(function (id) { scoped[id] = data[id]; scopedCols[id] = COLUMNS[id]; });
+  var lay = PivotDetect.detect(scoped, scopedCols, {
+    rowColumns: [ID.plate, ID.plex, ID.batch], pivotColumn: ID.stage,
+    valueColumns: [ID.ts, ID.op, ID.wit], excludeColumns: [ID.status]
+  });
+  var g = PivotDetect.build(lay, ID.status, opts || {});
+  return {
+    rows: g.rows.map(function (r) { return data[ID.plate][r.index]; }),
+    cols: g.pivotKeys.map(function (pk) { return pk.value; }),
+    // one cell value per row, resolved through the sorted column slots
+    firstCells: g.rows.map(function (r) {
+      var slot = g.pivotKeys[0].index;
+      var ri = r.cells[slot];
+      return ri === undefined ? null : data[ID.op][ri];
+    })
+  };
+}
+
+var natural = gridShape(DATA);
+var shuffled1 = gridShape(shuffleData(DATA, 7));
+var shuffled2 = gridShape(shuffleData(DATA, 991));
+
+check('row order identical after shuffle', shuffled1.rows, natural.rows);
+check('column order identical after shuffle', shuffled1.cols, natural.cols);
+check('cells still track their column after shuffle', shuffled1.firstCells, natural.firstCells);
+check('a second shuffle agrees too', shuffled2.rows, natural.rows);
+check('rows are actually sorted, not arrival order',
+  natural.rows.slice().sort(function (a, b) { return PivotDetect.compareValues(a, b); }),
+  natural.rows);
+
+console.log('\n--- explicit sort columns ---');
+var byOp = gridShape(DATA, { sortRow: ID.op });
+check('sorting rows by another column changes the order', byOp.rows !== natural.rows, true);
+check('same row set, reordered', byOp.rows.slice().sort(), natural.rows.slice().sort());
+var desc = gridShape(DATA, { sortRowDesc: true });
+check('descending is the reverse of ascending', desc.rows, natural.rows.slice().reverse());
+
+var byCap = gridShape(DATA, { sortColumn: ID.cap });
+check('pivot columns sortable by a header attribute', byCap.cols.length, natural.cols.length);
+var capOrder = byCap.cols.map(function (v) {
+  var i = DATA[ID.stage].indexOf(v);
+  return DATA[ID.cap][i];
+});
+check('columns ordered by that attribute',
+  capOrder, capOrder.slice().sort(function (a, b) { return a - b; }));
+
+console.log('\n--- cap is applied after sorting ---');
+var capped = gridShape(DATA, { maxRows: 5 });
+check('capped rows are the first 5 in sort order', capped.rows, natural.rows.slice(0, 5));
+var cappedShuffled = gridShape(shuffleData(DATA, 31), { maxRows: 5 });
+check('cap keeps the same rows regardless of arrival', cappedShuffled.rows, capped.rows);
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);
