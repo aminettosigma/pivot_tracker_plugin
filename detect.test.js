@@ -251,6 +251,30 @@ check('a single id is still accepted', gridShape(DATA, { sortRow: [ID.op] }).row
 check('unstreamed sort ids are dropped, not fatal',
   gridShape(DATA, { sortRow: ['not-a-column'] }).rows, natural.rows);
 
+console.log('\n--- a sort-only column must never be displayed ---');
+/* Stage Capacity stands in for Stage Seq: streamed so it can order the crosstab
+   columns, 1:1 with the pivot value, and with nothing explicitly assigned so
+   auto-detection is free to grab it. It must not appear in any visible role. */
+var hidden = PivotDetect.detect(DATA, COLUMNS, {
+  pivotColumn: ID.stage,
+  excludeColumns: [ID.cap]
+});
+check('not a left column', hidden.rowColumns.indexOf(ID.cap), -1);
+check('not a header attribute', hidden.columnDims.indexOf(ID.cap), -1);
+check('not a pill value', hidden.valueColumns.indexOf(ID.cap), -1);
+var hiddenGrid = PivotDetect.build(hidden, null, { sortColumn: [ID.cap] });
+var hiddenOrder = hiddenGrid.pivotKeys.map(function (pk) {
+  return DATA[ID.cap][DATA[ID.stage].indexOf(pk.value)];
+});
+check('still orders the crosstab columns',
+  hiddenOrder, hiddenOrder.slice().sort(function (a, b) { return a - b; }));
+check('and there is more than one capacity to order by',
+  hiddenOrder.filter(function (v, i, a) { return a.indexOf(v) === i; }).length > 1, true);
+check('picking it explicitly makes it visible again',
+  PivotDetect.detect(DATA, COLUMNS, {
+    pivotColumn: ID.stage, valueColumns: [ID.op, ID.cap], excludeColumns: []
+  }).columnDims.indexOf(ID.cap) !== -1, true);
+
 console.log('\n--- cap is applied after sorting ---');
 var capped = gridShape(DATA, { maxRows: 5 });
 check('capped rows are the first 5 in sort order', capped.rows, natural.rows.slice(0, 5));

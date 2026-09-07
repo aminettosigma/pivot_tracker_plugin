@@ -34,11 +34,11 @@
 
     { name: 'sortRowColumn', type: 'column', source: 'source', allowMultiple: true,
       label: 'Sort rows by',
-      description: 'One or more columns that order the pivot rows, in priority order (Batch Id then Plate Id, say). Only columns that exist in the source element appear here -- use "+ Add new column" in this picker to pull in one that is missing. Direction is set by the "Rows: descending" toggle below. Defaults to the first left column.' },
+      description: 'One or more columns that order the pivot rows, in priority order (Batch Id then Plate Id, say). A column used only for sorting is not displayed anywhere -- add it to "Left columns" too if you want to see it. Only columns that exist in the source element appear here; use "+ Add new column" in this picker to pull in one that is missing. Direction is set by the "Rows: descending" toggle below.' },
     { name: 'sortRowDesc', type: 'toggle', label: 'Rows: descending (Z\u2192A, 9\u21920)', defaultValue: false },
     { name: 'sortColumnColumn', type: 'column', source: 'source', allowMultiple: true,
       label: 'Sort pivot columns by',
-      description: 'One or more columns that order the crosstab columns, in priority order -- e.g. a stage sequence number. Direction is set by the "Pivot columns: descending" toggle below. Defaults to the pivot column\'s own values.' },
+      description: 'One or more columns that order the crosstab columns, in priority order -- e.g. Stage Seq. A column used only for sorting is not displayed anywhere: it does not become a header attribute or a pill value, so Stage Seq can order the stages without showing up. Direction is set by the "Pivot columns: descending" toggle below.' },
     { name: 'sortColumnDesc', type: 'toggle', label: 'Pivot columns: descending (Z\u2192A, 9\u21920)', defaultValue: false },
 
     { name: 'colorColumn', type: 'column', source: 'source', allowMultiple: false,
@@ -70,7 +70,8 @@
       placeholder: '5000',
       description: 'Safety cap on the number of pivot rows built, so a mis-picked left column cannot wedge the browser. Rows are virtualized, so a high value is fine. Blank uses 5000; 0 means unlimited.' },
 
-    { name: 'showValueLabels', type: 'toggle', label: 'Show value-column header row' },
+    { name: 'showValueLabels', type: 'toggle',
+      label: 'Show a field-name row under each column header', defaultValue: false },
     { name: 'compact', type: 'toggle', label: 'Compact rows' },
     { name: 'darkMode', type: 'toggle', label: 'Dark mode', defaultValue: false,
       description: 'Off (default) matches Sigma\'s light workbook surface. On switches the grid and pill palette to dark.' },
@@ -125,6 +126,22 @@
       group.forEach(function (id) { if (out.indexOf(id) === -1) out.push(id); });
     });
     return out;
+  }
+
+  /* Columns that are streamed for a job other than display -- the color source and
+     the sort keys. Without this, a sort-only column such as Stage Seq would be
+     picked up by auto-detection and rendered: as a pill value if it varies freely,
+     or worse, under the pivot header if it happens to be 1:1 with the pivot column,
+     which Stage Seq is. Anything the user *also* placed in a visible role stays
+     visible -- an explicit choice outranks the inference. */
+  function hiddenColumns(cfg) {
+    var visible = asArray(cfg.rowColumns)
+      .concat(asArray(cfg.valueColumns), asArray(cfg.pivotColumn));
+    return asArray(cfg.colorColumn)
+      .concat(asArray(cfg.sortRowColumn), asArray(cfg.sortColumnColumn))
+      .filter(function (id, i, a) {
+        return id && a.indexOf(id) === i && visible.indexOf(id) === -1;
+      });
   }
 
   /* Re-subscribes when the source changes *or* when the set of requested columns
@@ -497,7 +514,7 @@
       rowColumns: asArray(cfg.rowColumns),
       pivotColumn: cfg.pivotColumn,
       valueColumns: asArray(cfg.valueColumns),
-      excludeColumns: cfg.colorColumn ? [cfg.colorColumn] : []
+      excludeColumns: hiddenColumns(cfg)
     });
 
     var grid = (layout.rowKey && layout.pivotColumn)
@@ -553,7 +570,9 @@
       start: -1, end: -1
     };
 
-    var showLabels = cfg.showValueLabels !== false && layout.valueColumns.length > 1;
+    // Off by default: with more than one value in a pill the order is consistent
+    // down the whole column, so the names are noise once you know the layout.
+    var showLabels = !!cfg.showValueLabels && layout.valueColumns.length > 1;
     var html = [];
 
     // Sticky offsets as generated rules: one per left column instead of one

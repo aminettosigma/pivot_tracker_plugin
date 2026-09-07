@@ -218,6 +218,7 @@
     result.pivotColumn = pivotColumn;
 
     // Left-side columns: the row key, plus anything constant per row key.
+    var excluded = overrides.excludeColumns || [];
     var rowColumns;
     if (explicitRows.length) {
       rowColumns = explicitRows.slice();
@@ -226,6 +227,7 @@
       rowColumns = [rowKey];
       colIds.forEach(function (id) {
         if (id === rowKey || id === pivotColumn) return;
+        if (excluded.indexOf(id) !== -1) return;   // sort/color-only column
         if (statOf(id) <= 1) return;
         if (dependsOn(data, id, rowKey, n)) rowColumns.push(id);
       });
@@ -233,7 +235,6 @@
     }
     result.rowColumns = rowColumns;
 
-    var excluded = overrides.excludeColumns || [];
     var explicitValues = (overrides.valueColumns || []).filter(known);
 
     /* Attributes of the column dimension (constant per pivot value, e.g. a stage's
@@ -246,6 +247,10 @@
       if (id === rowKey || id === pivotColumn) return;
       if (rowColumns.indexOf(id) !== -1) return;
       if (columnDims.indexOf(id) !== -1) return;
+      // A column streamed only to sort or color by must not surface in the header
+      // either -- and a sort key like a stage sequence number is exactly the kind
+      // of column that is 1:1 with the pivot value, so it would land here.
+      if (excluded.indexOf(id) !== -1) return;
       if (statOf(id) <= 1) return;
       if (dependsOn(data, id, pivotColumn, n)) columnDims.push(id);
     });

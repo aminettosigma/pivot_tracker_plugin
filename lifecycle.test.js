@@ -243,6 +243,18 @@ sandbox.__tick();
 check('structural change does re-detect', detectCalls >= 1, true);
 check('dark class applied to body', sandbox.document.body.classList.contains('dark'), true);
 
+console.log('\n--- field-name row under the headers ---');
+// Two value columns are in scope from the structural change above, so the row
+// would render if it were enabled -- proving the assertion is not vacuous.
+check('hidden by default', /grp-sub/.test(root.innerHTML), false);
+live = Object.assign({}, live, { showValueLabels: true });
+sandbox.__tick();
+check('shown when the toggle is on', /grp-sub/.test(root.innerHTML), true);
+check('names its value columns', /OPERATOR|Operator/.test(root.innerHTML), true);
+live = Object.assign({}, live, { showValueLabels: false });
+sandbox.__tick();
+check('hidden again when turned off', /grp-sub/.test(root.innerHTML), false);
+
 console.log('\n--- max rows cap ---');
 live = Object.assign({}, live, { maxRows: '25', darkMode: false, compact: false });
 sandbox.__tick();
