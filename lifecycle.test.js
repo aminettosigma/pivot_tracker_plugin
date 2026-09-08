@@ -538,6 +538,9 @@ pages = [
 ];
 fetchMores = 0; pager = null;
 setConfig({ source: 'el-resend', debug: true });
+/* A re-sent page adds no rows, so the next ask is backed off onto a timer rather
+   than issued inline. Step the clock, or the load looks stuck at one page. */
+flushTimers();
 check('rewind on repeated offset, no duplicates', diag('rowsLoaded'), totalLen);
 
 console.log('\n--- a delivery that adds no rows is not the end of the data ---');
@@ -755,6 +758,46 @@ Object.keys(truth).forEach(function (k) {
 });
 check('every populated cell was checked', checked, Object.keys(truth).length);
 check('no cell lost or misplaced its operator after ragged pages', wrong, []);
+wrap.clientHeight = 600;
+autoSend = true;
+
+
+console.log('\n--- a page split across deliveries must not fabricate keyless rows ---');
+/* The suspected shape of the live failure: one page arrives as two messages at the
+   same offset, each carrying only some of the columns. Padding every column up to
+   the longest one turns "this column has not received these rows yet" into "these
+   rows are null" -- and for the row key that fabricates rows belonging to no plate,
+   which is how a card disappears while its data is still in the element. */
+autoSend = false;
+var splitPages = [];
+fivePages(small).forEach(function (pg) {
+  var a = { data: {}, offset: pg.offset, isComplete: false };
+  var b = { data: {}, offset: pg.offset, isComplete: false };
+  // Keys and stage in the first message, everything else in the second.
+  Object.keys(pg.data).forEach(function (k) {
+    (k === ID.plate || k === ID.plex || k === ID.stage ? a : b).data[k] = pg.data[k];
+  });
+  splitPages.push(a, b);
+});
+splitPages[splitPages.length - 1].isComplete = true;
+pages = splitPages;
+pager = null;
+setConfig({ source: 'el-split', rowColumns: [ID.plate, ID.plex], pivotColumn: ID.stage,
+  valueColumns: [ID.ts, ID.op], colorColumn: ID.status, maxRows: '0', debug: true,
+  sortRowColumn: [], sortRowDesc: false, sortColumnColumn: [], sortColumnDesc: false });
+while (pager.next < pages.length) pager.send();
+
+var keyless = JSON.parse(/&quot;keylessRows&quot;: (\{[^}]*\})/.exec(root.innerHTML)[1]
+  .replace(/&quot;/g, '"'));
+check('no row lost its plate id', keyless.missingRowKey, 0);
+check('no row lost its stage', keyless.missingPivotValue, 0);
+check('all source rows were kept', diag('sourceRows'), small[ID.plate].length);
+// And the grid still shows the same populated cells the unsplit fixture does.
+wrap.clientHeight = 4000;
+wrap.scrollTop = 0;
+wrap.fire('scroll', {});
+check('every card survived the split delivery',
+  (tbody.innerHTML.match(/class="pill/g) || []).length, 78);
 wrap.clientHeight = 600;
 autoSend = true;
 

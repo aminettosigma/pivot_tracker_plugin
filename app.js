@@ -318,8 +318,18 @@
        globally and then capped, so every intermediate repaint showed the first N
        sorted rows *of the fraction loaded so far*, a different plate set on each
        of the ~20 pages. Load into a shadow buffer instead and swap once, so the
-       user sees the old grid until the new one is complete. */
-    if (offset === 0) {
+       user sees the old grid until the new one is complete.
+
+       But offset 0 alone does not mean refetch. A single page can arrive as several
+       deliveries at the *same* offset, each carrying only some of the columns, and
+       treating the second one as a refetch discards the columns the first one just
+       delivered -- leaving those rows with no plate id and no stage, so their cards
+       vanish while the data is still in the element. Only a page 0 that arrives when
+       no load is in flight is a refetch; one that arrives mid-load is merged, which
+       the truncate-to-offset rule below already handles even if it is a genuine
+       re-send. */
+    var midLoad = !!state.data && !state.complete && state.loaded > 0;
+    if (offset === 0 && !midLoad) {
       if (state.data && rendered) {
         state.pending = {};
         buffering = true;
@@ -364,12 +374,15 @@
     Object.keys(sink).forEach(function (id) {
       if (sink[id].length > loaded) loaded = sink[id].length;
     });
-    // Same reasoning at the tail: a column the page omitted entirely, or one whose
-    // trailing nulls were trimmed, has to end this merge the same length as the
-    // rest or the next page will land on the wrong rows.
-    Object.keys(sink).forEach(function (id) {
-      while (sink[id].length < loaded) { sink[id].push(null); stats.padded++; }
-    });
+    /* NO tail padding. Padding a column up to the longest one invents values that
+       were never sent: if a delivery carries only some columns -- which is what the
+       enormous paddedValues count showed -- the missing ones get filled with nulls,
+       and for the row key that fabricates phantom rows with no key while burying the
+       real rows those nulls stand in for. Alignment does not need it: every delivery
+       states the offset its values start at, and the pad-to-offset rule above is
+       what keeps columns parallel. A column that is simply behind stays short, and a
+       short column reads as undefined, which renders as empty without inventing a
+       row. */
 
     /* Too big to hold two copies: hand the buffer over as the live data (which
        releases the old copy, so the peak is unchanged) and keep suppressing
@@ -1162,6 +1175,12 @@
     if (cfg.debug) {
       html.push('<div class="debug"><b>Detected layout</b><pre>' + esc(JSON.stringify({
         sourceRows: layout.rowCount,
+        /* Per-column lengths, and how many source rows carry no row key or no pivot
+           value. Columns of unequal length mean Sigma splits a page across several
+           deliveries; a non-zero keyless count means rows exist that can never
+           appear in the grid, which is exactly how a card goes missing. */
+        columnLengths: columnLengths(requested),
+        keylessRows: keylessRows(layout),
         cellProbe: cellProbe(cfg, layout, grid, requested),
         rowsLoaded: state.loaded,
         rowsReportedByHost: state.totalRows,
@@ -1287,6 +1306,34 @@
       (view && view.grid && view.grid.truncated
         ? ' It may be past the <b>Max rows</b> cap.' : '');
     root.appendChild(el);
+  }
+
+  /* How many values each column actually holds. Columns are parallel arrays, so any
+     disagreement here is the plugin's whole class of alignment bugs in one line. */
+  function columnLengths(requested) {
+    var out = {};
+    (requested || []).forEach(function (id) {
+      out[colName(id)] = ((state.data || {})[id] || []).length;
+    });
+    return out;
+  }
+
+  /* Rows that cannot be placed. A row with no key belongs to no grid row and a row
+     with no pivot value belongs to no column, so either one is silently dropped --
+     or worse, collapsed together into a single phantom cell. */
+  function keylessRows(layout) {
+    var keyArr = (state.data || {})[layout.rowKey] || [];
+    var pivArr = (state.data || {})[layout.pivotColumn] || [];
+    var n = Math.max(keyArr.length, pivArr.length);
+    var blank = function (v) { return v === null || v === undefined || String(v).trim() === ''; };
+    var noKey = 0, noPivot = 0, neither = 0;
+    for (var i = 0; i < n; i++) {
+      var a = blank(keyArr[i]), b = blank(pivArr[i]);
+      if (a) noKey++;
+      if (b) noPivot++;
+      if (a && b) neither++;
+    }
+    return { scanned: n, missingRowKey: noKey, missingPivotValue: noPivot, missingBoth: neither };
   }
 
   /* Reports what the element actually streamed for one cell. Deliberately works off
