@@ -83,11 +83,6 @@
     { name: 'darkMode', type: 'toggle', label: 'Dark mode', defaultValue: false,
       description: 'Off (default) matches Sigma\'s light workbook surface. On switches the grid and pill palette to dark.' },
     { name: 'debug', type: 'toggle', label: 'Show detection diagnostics' },
-    /* Off by default: the plain channel delivers the whole element at once, which is
-       what removes the reassembly the paged path needs. Turn this on only if an
-       element is too large for one payload. */
-    { name: 'pagedLoad', type: 'toggle',
-      label: 'Load data in pages (only for very large elements)' },
     /* Answers "why is this card empty?" for one specific cell, which no amount of
        aggregate diagnostics can. Prints every source row the element streamed for
        that row value, with each value quoted so whitespace and type differences
@@ -203,24 +198,11 @@
       render();
     });
 
-    /* Two ways to read an element, and they fail differently.
-
-       The paged channel (subscribeToIncrementalElementData) hands over the element a
-       page at a time and leaves the plugin to reassemble it from the offsets. Every
-       data-loss bug this plugin has had lived in that reassembly, because the stream
-       is under-specified: an empty delivery does not mean the end, the host may stop
-       answering without saying so, and one page can arrive as several messages at the
-       same offset carrying different subsets of the columns. There is no way to tell
-       a finished load from an abandoned one except by the host's own isComplete flag,
-       which it does not always send.
-
-       The plain channel hands over the whole element in one payload. Nothing to
-       merge, nothing to align, no way to end up holding half an element without
-       knowing it. That is worth more than the progress bar the paged channel buys,
-       so it is now the default. Paging stays available behind a toggle in case an
-       element is large enough that one payload will not arrive. */
-    if (state.config.pagedLoad &&
-        typeof client.elements.subscribeToIncrementalElementData === 'function') {
+    /* Sigma paginates element data: the plain subscription delivers whatever fits
+       one page, so a large element silently renders a prefix -- switching to it lost
+       most of the rows, which is exactly what this comment warned. Subscribe
+       incrementally and pull pages until isComplete, accumulating in place. */
+    if (typeof client.elements.subscribeToIncrementalElementData === 'function') {
       state.loaded = 0;
       state.totalRows = null;
       state.complete = false;
@@ -233,28 +215,10 @@
         mergeChunk(chunk, sourceId);
       });
     } else {
-      setLoading(true);
       unsubData = client.elements.subscribeToElementData(sourceId, function (data) {
-        /* A refetch after a comment is written re-delivers the whole element, so the
-           swap is atomic by construction -- there is no partial state for a repaint
-           to catch, which is what the shadow buffer had to fake for the paged path. */
-        state.data = data || {};
-        state.loaded = 0;
-        Object.keys(state.data).forEach(function (id) {
-          var col = state.data[id];
-          if (Array.isArray(col) && col.length > state.loaded) state.loaded = col.length;
-        });
-        state.totalRows = state.loaded;
+        state.data = data;
         state.complete = true;
-        // None of the paged failure modes can occur here; say so rather than
-        // leaving a stale warning from a previous paged load on screen.
-        state.stopped = false;
-        state.reloadFailed = false;
-        state.pending = null;
-        buffering = false;
-        frozen = false;
         state.dataVersion++;
-        setLoading(false);
         render();
       });
     }
