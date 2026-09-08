@@ -734,6 +734,10 @@ check('and reports the pair as present',
   /&quot;displayedByTheGrid&quot;: [1-9]/.test(probeText), true);
 check('and confirms it is a pivot column',
   /&quot;isAPivotColumn&quot;: true/.test(probeText), true);
+check('the probe shows the markup emitted for the cell',
+  /&quot;renderedHtml&quot;: &quot;&lt;td/.test(probeText), true);
+check('and that markup contains a pill',
+  /&quot;cardsInThisRowsHtml&quot;: [1-9]/.test(probeText), true);
 check('the probe reports the grid row it found',
   /&quot;gridRow&quot;: [0-9]/.test(probeText), true);
 check('and the header each cell of that row sits under',

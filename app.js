@@ -1181,6 +1181,18 @@
      the raw arrays rather than the built grid, so it still tells you something when
      the grid is the thing that is wrong. Values are shown via JSON so a trailing
      space, a number-vs-string difference or a null is visible rather than inferred. */
+  /* Splits the markup the plugin emits for one row into its <td>s. Uses rowHtml,
+     the same function that paints the grid, so what this reports is what the
+     browser is given -- not a reconstruction of it. */
+  function renderedCells(row) {
+    var html = rowHtml(row);
+    var parts = html.split('<td');
+    parts.shift();                                    // the leading <tr>
+    return parts.map(function (p) {
+      return ('<td' + p).replace(/<\/tr>\s*$/, '');
+    });
+  }
+
   /* Where a source row ended up: its grid row, and the header of the slot it sits
      in. Linear, but only ever called for the handful of rows a probe lists. */
   function locate(grid, sourceIndex) {
@@ -1287,6 +1299,22 @@
             ? 'Source rows exist but none is displayed -- report this, it is a plugin bug.'
             : 'Data exists and is displayed; if the card looks empty, every value column is null for the chosen row.')
       };
+      /* The last gap: the model can be right while the markup is wrong. Report the
+         exact <td> the plugin emits for this cell, so "the card is missing" can be
+         settled as either no pill in the HTML (a rendering bug) or a pill that is
+         present but not visible (geometry or CSS). */
+      if (gr !== -1) {
+        var cells = renderedCells(grid.rows[gr]);
+        var pos = -1;
+        for (var pi = 0; pi < grid.pivotKeys.length; pi++) {
+          if (norm(grid.pivotKeys[pi].value) === wantCol) { pos = pi; break; }
+        }
+        report.forPivotValue.cardsInThisRowsHtml = cells.filter(function (c) {
+          return c.indexOf('class="pill') !== -1;
+        }).length;
+        report.forPivotValue.renderedHtml = pos === -1 ? '(not a column)'
+          : (cells[layout.rowColumns.length + pos] || '(no cell emitted)');
+      }
     }
     return report;
   }
