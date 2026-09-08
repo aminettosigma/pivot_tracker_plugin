@@ -719,5 +719,31 @@ check('no cell lost or misplaced its operator after ragged pages', wrong, []);
 wrap.clientHeight = 600;
 autoSend = true;
 
+
+console.log('\n--- the cell probe reports what the element actually sent ---');
+pages = onePage(sandbox.DATA);
+pager = null;
+var probePlate = small[ID.plate][0];
+var probeStage = small[ID.stage][0];
+setConfig({ source: 'el-probe', rowColumns: [ID.plate, ID.plex], pivotColumn: ID.stage,
+  valueColumns: [ID.ts, ID.op], colorColumn: ID.status, maxRows: '0', debug: true,
+  debugCell: probePlate + ' | ' + probeStage });
+var probeText = root.innerHTML;
+check('the probe found the row', /&quot;sourceRowsForThisRow&quot;: [1-9]/.test(probeText), true);
+check('and reports the pair as present',
+  /&quot;displayedByTheGrid&quot;: [1-9]/.test(probeText), true);
+check('and confirms it is a pivot column',
+  /&quot;isAPivotColumn&quot;: true/.test(probeText), true);
+
+// A pair the element never sent: the probe must say so, not stay silent.
+setConfig({ debugCell: probePlate + ' | NO-SUCH-STAGE' });
+check('a pair with no source rows is called out',
+  /streamed no row for this row.column pair/.test(root.innerHTML), true);
+
+setConfig({ debugCell: 'NOT-A-PLATE' });
+check('an unknown row value is called out',
+  /No source row has this value/.test(root.innerHTML), true);
+setConfig({ debugCell: '' });
+
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

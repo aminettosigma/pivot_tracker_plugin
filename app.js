@@ -82,7 +82,15 @@
     { name: 'compact', type: 'toggle', label: 'Compact rows' },
     { name: 'darkMode', type: 'toggle', label: 'Dark mode', defaultValue: false,
       description: 'Off (default) matches Sigma\'s light workbook surface. On switches the grid and pill palette to dark.' },
-    { name: 'debug', type: 'toggle', label: 'Show detection diagnostics' }
+    { name: 'debug', type: 'toggle', label: 'Show detection diagnostics' },
+    /* Answers "why is this card empty?" for one specific cell, which no amount of
+       aggregate diagnostics can. Prints every source row the element streamed for
+       that row value, with each value quoted so whitespace and type differences
+       are visible. */
+    { name: 'debugCell', type: 'text',
+      label: 'Debug: inspect one cell (row value, then pivot value)',
+      placeholder: '0000055 | QUANT-IT',
+      description: 'Turn on "Show detection diagnostics" as well. Enter the left-column value, optionally followed by " | " and the pivot column value. The diagnostics block then lists every source row the element sent for that row, so you can see whether the cell has data at all, whether it arrived under a slightly different spelling, and whether more than one source row competes for it.' }
   ]);
 
   var root = document.getElementById('root');
@@ -1047,6 +1055,7 @@
     if (cfg.debug) {
       html.push('<div class="debug"><b>Detected layout</b><pre>' + esc(JSON.stringify({
         sourceRows: layout.rowCount,
+        cellProbe: cellProbe(cfg, layout, grid, requested),
         rowsLoaded: state.loaded,
         rowsReportedByHost: state.totalRows,
         loadComplete: state.complete,
@@ -1166,6 +1175,83 @@
       (view && view.grid && view.grid.truncated
         ? ' It may be past the <b>Max rows</b> cap.' : '');
     root.appendChild(el);
+  }
+
+  /* Reports what the element actually streamed for one cell. Deliberately works off
+     the raw arrays rather than the built grid, so it still tells you something when
+     the grid is the thing that is wrong. Values are shown via JSON so a trailing
+     space, a number-vs-string difference or a null is visible rather than inferred. */
+  function cellProbe(cfg, layout, grid, requested) {
+    var wanted = String(cfg.debugCell || '').trim();
+    if (!wanted) return 'set "Debug: inspect one cell" to use this';
+    var parts = wanted.split('|');
+    var rowWanted = parts[0].trim();
+    var colWanted = parts.length > 1 ? parts.slice(1).join('|').trim() : null;
+
+    var keyArr = state.data[layout.rowKey] || [];
+    var pivArr = state.data[layout.pivotColumn] || [];
+    var norm = function (v) { return String(v === null || v === undefined ? '' : v).trim().toLowerCase(); };
+    var target = norm(rowWanted);
+
+    var exact = 0, loose = [];
+    for (var i = 0; i < keyArr.length; i++) {
+      if (norm(keyArr[i]) !== target) continue;
+      // Counted separately: an inexact match means the value differs by case or
+      // padding, which is enough to split one plate into two grid rows.
+      if (String(keyArr[i]) === rowWanted) exact++;
+      loose.push(i);
+    }
+    if (!loose.length) {
+      return { rowValue: rowWanted, found: 0,
+        note: 'No source row has this value in ' + colName(layout.rowKey) +
+          '. Check the exact spelling, or the row may be past the Max rows cap.' };
+    }
+
+    var report = { rowValue: rowWanted, rowKeyColumn: colName(layout.rowKey),
+      sourceRowsForThisRow: loose.length, exactStringMatches: exact,
+      pivotColumn: colName(layout.pivotColumn), rows: [] };
+
+    // Cap the listing: a plate with hundreds of step rows should not flood the panel.
+    var LIST = 40;
+    loose.slice(0, LIST).forEach(function (i) {
+      var entry = { sourceIndex: i };
+      entry[colName(layout.pivotColumn)] = JSON.stringify(pivArr[i]);
+      requested.forEach(function (id) {
+        if (id === layout.rowKey || id === layout.pivotColumn) return;
+        entry[colName(id)] = JSON.stringify((state.data[id] || [])[i]);
+      });
+      // Whether this source row is the one the grid chose to display.
+      var gridRow = null;
+      for (var r = 0; r < grid.rows.length; r++) {
+        if (grid.rows[r].cells.indexOf(i) !== -1) { gridRow = r; break; }
+      }
+      entry.shownInGrid = gridRow !== null;
+      report.rows.push(entry);
+    });
+    if (loose.length > LIST) report.andMore = loose.length - LIST;
+
+    if (colWanted !== null) {
+      var wantCol = norm(colWanted);
+      var matching = loose.filter(function (i) { return norm(pivArr[i]) === wantCol; });
+      var displayed = matching.filter(function (i) {
+        for (var r = 0; r < grid.rows.length; r++) {
+          if (grid.rows[r].cells.indexOf(i) !== -1) return true;
+        }
+        return false;
+      });
+      report.forPivotValue = {
+        value: colWanted,
+        sourceRows: matching.length,
+        displayedByTheGrid: displayed.length,
+        isAPivotColumn: grid.pivotKeys.some(function (pk) { return norm(pk.value) === wantCol; }),
+        note: !matching.length
+          ? 'The element streamed no row for this row/column pair, so the card is empty because there is nothing to draw. The value you can see in the pivot table is not in this element\'s result -- check the element\'s columns and filters.'
+          : (!displayed.length
+            ? 'Source rows exist but none is displayed -- report this, it is a plugin bug.'
+            : 'Data exists and is displayed; if the card looks empty, every value column is null for the chosen row.')
+      };
+    }
+    return report;
   }
 
   function paintWindow(force) {
