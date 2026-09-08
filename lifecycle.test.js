@@ -734,6 +734,13 @@ check('and reports the pair as present',
   /&quot;displayedByTheGrid&quot;: [1-9]/.test(probeText), true);
 check('and confirms it is a pivot column',
   /&quot;isAPivotColumn&quot;: true/.test(probeText), true);
+check('the probe reports the grid row it found',
+  /&quot;gridRow&quot;: [0-9]/.test(probeText), true);
+check('and the header each cell of that row sits under',
+  /&quot;rowAsRendered&quot;: \[/.test(probeText), true);
+// The point of the coordinates: a card under the wrong header is not "displayed".
+check('every located cell sits under its own stage',
+  /&quot;headerMatchesItsStage&quot;: false/.test(probeText), false);
 
 // A pair the element never sent: the probe must say so, not stay silent.
 setConfig({ debugCell: probePlate + ' | NO-SUCH-STAGE' });

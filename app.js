@@ -1181,6 +1181,21 @@
      the raw arrays rather than the built grid, so it still tells you something when
      the grid is the thing that is wrong. Values are shown via JSON so a trailing
      space, a number-vs-string difference or a null is visible rather than inferred. */
+  /* Where a source row ended up: its grid row, and the header of the slot it sits
+     in. Linear, but only ever called for the handful of rows a probe lists. */
+  function locate(grid, sourceIndex) {
+    for (var r = 0; r < grid.rows.length; r++) {
+      var cells = grid.rows[r].cells;
+      for (var c = 0; c < grid.pivotKeys.length; c++) {
+        var slot = grid.pivotKeys[c].index;
+        if (cells[slot] === sourceIndex) {
+          return { row: r, slot: slot, header: grid.pivotKeys[c].value };
+        }
+      }
+    }
+    return null;
+  }
+
   function cellProbe(cfg, layout, grid, requested) {
     var wanted = String(cfg.debugCell || '').trim();
     if (!wanted) return 'set "Debug: inspect one cell" to use this';
@@ -1220,24 +1235,46 @@
         if (id === layout.rowKey || id === layout.pivotColumn) return;
         entry[colName(id)] = JSON.stringify((state.data[id] || [])[i]);
       });
-      // Whether this source row is the one the grid chose to display.
-      var gridRow = null;
-      for (var r = 0; r < grid.rows.length; r++) {
-        if (grid.rows[r].cells.indexOf(i) !== -1) { gridRow = r; break; }
+      // Whether this source row is the one the grid chose to display, and where.
+      // "Somewhere in the grid" is not good enough: a card landing under the wrong
+      // header looks identical to a missing card from the user's side.
+      var at = locate(grid, i);
+      entry.shownInGrid = !!at;
+      if (at) {
+        entry.shownAtGridRow = at.row;
+        entry.shownUnderHeader = String(at.header);
+        entry.headerMatchesItsStage = norm(at.header) === norm(pivArr[i]);
       }
-      entry.shownInGrid = gridRow !== null;
       report.rows.push(entry);
     });
     if (loose.length > LIST) report.andMore = loose.length - LIST;
+
+    /* The whole row as the grid holds it, in display order. This is the definitive
+       answer to "is the card missing, or is it under a different column?" */
+    var gr = -1;
+    for (var g = 0; g < grid.rows.length; g++) {
+      if (grid.rows[g].key === window.PivotDetect.key(keyArr[loose[0]])) { gr = g; break; }
+    }
+    report.gridRow = gr;
+    if (gr === -1) {
+      report.gridRowNote = 'This row value has source rows but no row in the grid. ' +
+        'Report this -- it is a plugin bug.';
+    } else {
+      report.rowAsRendered = grid.pivotKeys.map(function (pk) {
+        var ri = grid.rows[gr].cells[pk.index];
+        return String(fmt(pk.value, layout.pivotColumn)) + ' -> ' +
+          (ri === undefined ? '(empty)'
+            : 'row ' + ri + ' ' + JSON.stringify(pivArr[ri]) +
+              ' start=' + JSON.stringify((state.data[layout.valueColumns[0]] || [])[ri]));
+      });
+    }
 
     if (colWanted !== null) {
       var wantCol = norm(colWanted);
       var matching = loose.filter(function (i) { return norm(pivArr[i]) === wantCol; });
       var displayed = matching.filter(function (i) {
-        for (var r = 0; r < grid.rows.length; r++) {
-          if (grid.rows[r].cells.indexOf(i) !== -1) return true;
-        }
-        return false;
+        var at = locate(grid, i);
+        return at && norm(at.header) === wantCol;
       });
       report.forPivotValue = {
         value: colWanted,
