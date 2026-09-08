@@ -171,7 +171,11 @@ var autoSend = true;
    config.get(). Drive them that way so the suite exercises the same path the
    workbook does; the snapshot is kept in step, as the host does on re-mount. */
 function setConfig(patch) {
-  live = Object.assign({}, live, patch);
+  /* Most of this suite exercises the paged loader, which is now opt-in: the plugin
+     defaults to the single-payload channel. Default it on here so those blocks keep
+     testing what they were written to test; the blocks about the plain channel
+     switch it off explicitly. */
+  live = Object.assign({ pagedLoad: true }, live, patch);
   emit(live);
 }
 
