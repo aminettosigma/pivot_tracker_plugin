@@ -95,7 +95,9 @@
 
   var root = document.getElementById('root');
   var state = { config: {}, data: null, columns: null, selected: null,
-    loaded: 0, totalRows: null, complete: false, dataVersion: 0, pending: null };
+    loaded: 0, totalRows: null, complete: false, dataVersion: 0, pending: null,
+    // Set when the load gave up before the host said it was complete.
+    stopped: false };
   var unsubData = null, unsubCols = null, boundKey = null, boundElement = null, lastConfigJson = null;
   /* `rendered` says a grid -- not a message -- is on screen, which is what makes a
      page 0 a reload rather than a first load. `buffering` means pages are landing
@@ -201,8 +203,10 @@
       state.loaded = 0;
       state.totalRows = null;
       state.complete = false;
+      state.stopped = false;
       state.dataVersion = 0;
       noProgress = 0;
+      clearSilence();
       setLoading(true);
       unsubData = client.elements.subscribeToIncrementalElementData(sourceId, function (chunk) {
         mergeChunk(chunk, sourceId);
@@ -223,6 +227,14 @@
      measured 2.5 GB peak for 2M rows that copy is not affordable, so past this
      many rows we give the copy back and simply stop repainting instead. */
   var BUFFER_ROW_LIMIT = 750000;
+  /* How many stalled deliveries to tolerate before declaring the load stuck, and
+     how long to wait between retries (multiplied by the attempt number). Generous:
+     giving up early is what truncated the element, and a slow load is far less
+     harmful than a silently incomplete one. */
+  var STALL_RETRIES = 8;
+  var STALL_DELAY_MS = 300;
+  // How long to wait for an answer to fetchMore before counting it as a stall.
+  var STALL_SILENCE_MS = 4000;
   var noProgress = 0, lastChunkPaint = 0, chunkTimer = null;
   /* Counters for the diagnostics block: they are what distinguishes the plugin
      repainting itself from Sigma re-mounting the iframe underneath it. */
@@ -232,11 +244,57 @@
     try { client.config.setLoadingState(!!on); } catch (e) { /* older host */ }
   }
 
+  /* Asking for the next page, with a watchdog. Two different things look like the
+     end of the data and neither one is: an empty delivery, and no delivery at all.
+     The second is the dangerous one -- mergeChunk never runs again, so without this
+     timer the plugin would sit on a partial grid with the loading bar on forever.
+     Both funnel into the same retry budget, and exhausting it is reported as a
+     stall rather than as a completed load. */
+  var silenceTimer = null;
+
+  function clearSilence() {
+    if (silenceTimer !== null) { clearTimeout(silenceTimer); silenceTimer = null; }
+  }
+
+  function giveUp() {
+    clearSilence();
+    state.stopped = true;
+    state.complete = true;
+    buffering = false;
+    frozen = false;
+    if (state.pending) { state.data = state.pending; state.pending = null; }
+    setLoading(false);
+    render();
+  }
+
+  function requestMore(sourceId, immediate) {
+    clearSilence();
+    var attempt = noProgress;
+    var ask = function () {
+      /* Armed BEFORE the request: a host that answers synchronously would otherwise
+         clear the watchdog before it existed, leaving it to fire later against a
+         load that had already finished. */
+      silenceTimer = setTimeout(function () {
+        silenceTimer = null;
+        noProgress++;
+        if (noProgress <= STALL_RETRIES) requestMore(sourceId, false);
+        else giveUp();
+      }, STALL_SILENCE_MS);
+      try { client.elements.fetchMoreElementData(sourceId); }
+      catch (e) { giveUp(); }
+    };
+    // Immediately while pages are flowing; backed off once it stalls.
+    if (immediate) ask();
+    else setTimeout(ask, STALL_DELAY_MS * Math.max(1, attempt));
+  }
+
   /* Chunks arrive as { data, offset, isComplete, totalRows }. Accumulate in place
      -- rebuilding the arrays per chunk would make loading O(rows x chunks) -- and
      bump a version so the layout memo still invalidates. */
   function mergeChunk(chunk, sourceId) {
     if (!chunk || typeof chunk !== 'object') return;
+    // An answer arrived, so the silence watchdog for the outstanding ask is moot.
+    clearSilence();
     stats.deliveries++;
     var incoming = chunk.data || {};
     var offset = typeof chunk.offset === 'number' ? chunk.offset : 0;
@@ -261,6 +319,8 @@
         frozen = false;
       }
       state.loaded = 0;
+      // A reload starts a fresh verdict on whether the load finished.
+      state.stopped = false;
     } else if (!state.data && !buffering) {
       state.data = {};
       state.loaded = 0;
@@ -308,20 +368,31 @@
       frozen = true;
       stats.frozen++;
     }
-    noProgress = loaded > state.loaded ? 0 : noProgress + 1;
+    var progressed = loaded > state.loaded;
+    noProgress = progressed ? 0 : noProgress + 1;
     state.loaded = loaded;
     state.totalRows = chunk.totalRows || state.totalRows;
     state.complete = !!chunk.isComplete;
     state.dataVersion++;
 
-    // Stop pulling when done, when the host stops making progress (which would
-    // otherwise loop forever), or at the ceiling.
-    var more = !state.complete && noProgress < 2 && loaded < HARD_ROW_CEILING;
-    if (more) {
-      try { client.elements.fetchMoreElementData(sourceId); }
-      catch (e) { state.complete = true; }
-    } else {
-      state.complete = true;
+    /* A delivery that adds no rows means "nothing yet", NOT "nothing left". The
+       old guard gave up after two of them and then set complete = true, which
+       silently truncated the element at a page boundary -- 325,000 of an unknown
+       total -- and dropped whichever stages happened to live in the unread pages.
+       Because the truncation point moved with every reload, cards vanished and
+       reappeared. So: retry a stalled fetch several times, with a growing delay to
+       give the host room to produce the next page, and if we do eventually give up,
+       record it as a stall rather than as success. */
+    var more = !state.complete && noProgress <= STALL_RETRIES && loaded < HARD_ROW_CEILING;
+    if (more) requestMore(sourceId, progressed);
+    else {
+      if (!state.complete) {
+        /* Never claim a truncated load is complete. state.stopped drives a visible
+           warning, because a grid that is quietly missing rows is worse than one
+           that says so. */
+        state.stopped = true;
+        state.complete = true;
+      }
       setLoading(false);
     }
 
@@ -1031,6 +1102,14 @@
     html.push(legendHtml(cfg, compiled, domain, hasBlank));
 
     var notes = [];
+    /* A stalled load is the one condition the user must not have to discover by
+       noticing an absent card, so it is stated first and in the warning style. */
+    if (state.stopped) {
+      notes.push('<b>Incomplete data.</b> Sigma stopped sending rows after ' +
+        (state.loaded || 0).toLocaleString() +
+        ' without reporting the query as finished, so some cards are missing. ' +
+        'Refresh the element to try again.');
+    }
     /* Only the very first load fills in as it goes; a reload is buffered and
        swapped in one step, so promising otherwise would be a lie. This note is the
        plugin's only loading indicator -- setLoading() drives Sigma's own bar, so
@@ -1049,7 +1128,10 @@
     }
     if (colorWriteError) notes.push(colorWriteError);
     if (notes.length) {
-      html.push('<div class="note">' + notes.join(' &nbsp;\u00b7&nbsp; ') + '</div>');
+      // The note bar is normally a single line; a stalled load earns the warning
+      // colour and the room to wrap, since it explains an otherwise silent gap.
+      html.push('<div class="note' + (state.stopped ? ' warn wrap' : '') + '">' +
+        notes.join(' &nbsp;\u00b7&nbsp; ') + '</div>');
     }
 
     if (cfg.debug) {
@@ -1059,6 +1141,9 @@
         rowsLoaded: state.loaded,
         rowsReportedByHost: state.totalRows,
         loadComplete: state.complete,
+        /* True means the load gave up before Sigma reported it finished, so the grid
+           is missing rows. This is the signature of a silently truncated element. */
+        loadStalledIncomplete: !!state.stopped,
         /* Reload accounting. A rebuild count that climbs while nothing was edited
            means the plugin is thrashing; deliveries climbing with rebuilds flat is
            the intended buffered reload. And repaints resetting to 1 with the others

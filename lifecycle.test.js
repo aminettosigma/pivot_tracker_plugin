@@ -87,7 +87,12 @@ function createElement(tag) {
 }
 
 var sandbox = {
-  console: console, setTimeout: setTimeout, clearTimeout: clearTimeout,
+  console: console,
+  /* Timers are queued rather than real: the loader now backs off with setTimeout
+     when a delivery stalls, and a test has to be able to step that clock. Nothing
+     in the suite depends on a timer firing on its own. */
+  setTimeout: function (fn, ms) { timers.push({ fn: fn, ms: ms || 0, id: ++timerId }); return timerId; },
+  clearTimeout: function (id) { timers = timers.filter(function (t) { return t.id !== id; }); },
   setInterval: function (fn) { sandbox.__tick = fn; return 1; },
   requestAnimationFrame: function (fn) { fn(); return 1; }
 };
@@ -147,6 +152,15 @@ sandbox.SigmaPlugin = {
 var vars = [], actions = [];
 var writes = [];
 var pages = [], pager = null, fetchMores = 0, loadingStates = [];
+var timers = [], timerId = 0;
+// Runs queued timers, including any they queue in turn, until the queue is empty.
+function flushTimers(limit) {
+  var rounds = 0;
+  while (timers.length && rounds++ < (limit || 200)) {
+    var due = timers; timers = [];
+    due.sort(function (a, b) { return a.ms - b.ms; }).forEach(function (t) { t.fn(); });
+  }
+}
 /* Pages normally cascade: fetchMore immediately delivers the next one, so a whole
    load runs in one call stack. Turning that off lets a test step through a reload
    page by page and inspect the DOM between pages, which is the only way to prove
@@ -526,16 +540,41 @@ fetchMores = 0; pager = null;
 setConfig({ source: 'el-resend', debug: true });
 check('rewind on repeated offset, no duplicates', diag('rowsLoaded'), totalLen);
 
-console.log('\n--- host that never completes must not loop forever ---');
+console.log('\n--- a delivery that adds no rows is not the end of the data ---');
+/* Sigma answers a fetchMore with an empty chunk while it is still working. Treating
+   that as end-of-data truncated the element at a page boundary and dropped whole
+   stages -- and because the cut-off moved on every reload, cards vanished and came
+   back. Two empty deliveries in the middle must not stop the load. */
+pages = [
+  { data: slice(0, cut), offset: 0, isComplete: false, totalRows: totalLen },
+  { data: {}, offset: cut, isComplete: false, totalRows: totalLen },
+  { data: {}, offset: cut, isComplete: false, totalRows: totalLen },
+  { data: slice(cut, cut * 2), offset: cut, isComplete: false, totalRows: totalLen },
+  { data: slice(cut * 2, totalLen), offset: cut * 2, isComplete: true, totalRows: totalLen }
+];
+fetchMores = 0; pager = null; timers = [];
+setConfig({ source: 'el-hiccup', maxRows: '0', debug: true });
+flushTimers();
+check('the stall did not end the load', diag('rowsLoaded'), totalLen);
+check('and the load is genuinely complete', diag('loadComplete'), true);
+check('so nothing is reported as missing', diag('loadStalledIncomplete'), false);
+
+console.log('\n--- host that never completes must give up AND say so ---');
 pages = [
   { data: slice(0, cut), offset: 0, isComplete: false, totalRows: totalLen },
   { data: { }, offset: cut, isComplete: false, totalRows: totalLen },
   { data: { }, offset: cut, isComplete: false, totalRows: totalLen }
 ];
-fetchMores = 0; pager = null;
+fetchMores = 0; pager = null; timers = [];
 setConfig({ source: 'el-stalled', debug: true });
-check('stopped fetching after no progress', fetchMores <= 3, true);
-check('gave up and marked complete', diag('loadComplete'), true);
+flushTimers();
+check('it retried more than twice before giving up', fetchMores > 2, true);
+check('it did stop rather than loop forever', fetchMores < 40, true);
+check('the truncation is recorded, not disguised as success',
+  diag('loadStalledIncomplete'), true);
+check('and stated on screen',
+  /Incomplete data/.test(root.innerHTML), true);
+check('loading state cleared', loadingStates[loadingStates.length - 1], false);
 
 console.log('\n--- a reload must not repaint until it is complete ---');
 /* This is the bug the plan was written for: rows are sorted globally and then

@@ -126,6 +126,11 @@
     flex: 0 0 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .note b { color: var(--text); font-weight: 600; }
+  /* A row that could not be found after a reload is worth noticing, not just
+     reading -- but it is still a note, so it keeps the same height and position. */
+  .note.warn { color: #8a5a00; background: #fff6e0; border-top-color: #e7cd93; }
+  .note.wrap { white-space: normal; }
+  body.dark .note.warn { color: #f0c976; background: #3a2f16; border-top-color: #6b551f; }
 
   /* Legend: what each color means, and the entry point for changing one. */
   .legend {
