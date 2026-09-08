@@ -97,7 +97,9 @@
   var state = { config: {}, data: null, columns: null, selected: null,
     loaded: 0, totalRows: null, complete: false, dataVersion: 0, pending: null,
     // Set when the load gave up before the host said it was complete.
-    stopped: false };
+    stopped: false,
+    // Set when a *reload* gave up: the grid still holds the last complete data.
+    reloadFailed: false };
   var unsubData = null, unsubCols = null, boundKey = null, boundElement = null, lastConfigJson = null;
   /* `rendered` says a grid -- not a message -- is on screen, which is what makes a
      page 0 a reload rather than a first load. `buffering` means pages are landing
@@ -258,11 +260,22 @@
 
   function giveUp() {
     clearSilence();
-    state.stopped = true;
     state.complete = true;
-    buffering = false;
+    /* A reload that never finished must NOT replace a complete grid with its partial
+       buffer -- that is the "I add a comment and the card vanishes" failure, and it
+       destroys good data to show worse data. Throw the buffer away, keep what is on
+       screen, and say the refresh did not finish. A first load has nothing to fall
+       back on, so there the partial data is all there is and it is shown as such. */
+    if (buffering && state.data) {
+      state.pending = null;
+      buffering = false;
+      state.reloadFailed = true;
+    } else {
+      if (state.pending) { state.data = state.pending; state.pending = null; }
+      buffering = false;
+      state.stopped = true;
+    }
     frozen = false;
-    if (state.pending) { state.data = state.pending; state.pending = null; }
     setLoading(false);
     render();
   }
@@ -321,6 +334,7 @@
       state.loaded = 0;
       // A reload starts a fresh verdict on whether the load finished.
       state.stopped = false;
+      state.reloadFailed = false;
     } else if (!state.data && !buffering) {
       state.data = {};
       state.loaded = 0;
@@ -387,11 +401,17 @@
     if (more) requestMore(sourceId, progressed);
     else {
       if (!state.complete) {
-        /* Never claim a truncated load is complete. state.stopped drives a visible
-           warning, because a grid that is quietly missing rows is worse than one
-           that says so. */
-        state.stopped = true;
+        /* Never claim a truncated load is complete. Same split as giveUp(): a stalled
+           reload keeps the good data it already had, a stalled first load has to show
+           what little it got. */
         state.complete = true;
+        if (buffering && state.data) {
+          state.pending = null;
+          buffering = false;
+          state.reloadFailed = true;
+        } else {
+          state.stopped = true;
+        }
       }
       setLoading(false);
     }
@@ -1121,6 +1141,11 @@
           ? ' The grid below stays as it is until every page has arrived.'
           : ' The grid fills in as pages arrive.'));
     }
+    if (state.reloadFailed) {
+      notes.push('<b>Refresh did not finish.</b> Sigma stopped sending rows part way ' +
+        'through reloading this element, so the grid still shows the data from before ' +
+        'the refresh. Reload the element to try again.');
+    }
     if (grid.truncated) {
       notes.push('Showing the first ' + grid.rows.length.toLocaleString() +
         ' of ' + grid.totalRows.toLocaleString() + ' rows. ' +
@@ -1130,7 +1155,7 @@
     if (notes.length) {
       // The note bar is normally a single line; a stalled load earns the warning
       // colour and the room to wrap, since it explains an otherwise silent gap.
-      html.push('<div class="note' + (state.stopped ? ' warn wrap' : '') + '">' +
+      html.push('<div class="note' + (state.stopped || state.reloadFailed ? ' warn wrap' : '') + '">' +
         notes.join(' &nbsp;\u00b7&nbsp; ') + '</div>');
     }
 
@@ -1144,6 +1169,8 @@
         /* True means the load gave up before Sigma reported it finished, so the grid
            is missing rows. This is the signature of a silently truncated element. */
         loadStalledIncomplete: !!state.stopped,
+        // True means a reload stalled and was discarded to protect the good data.
+        reloadStalledAndWasDiscarded: !!state.reloadFailed,
         /* Reload accounting. A rebuild count that climbs while nothing was edited
            means the plugin is thrashing; deliveries climbing with rebuilds flat is
            the intended buffered reload. And repaints resetting to 1 with the others

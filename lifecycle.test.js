@@ -795,5 +795,36 @@ check('an unknown row value is called out',
   /No source row has this value/.test(root.innerHTML), true);
 setConfig({ debugCell: '' });
 
+
+console.log('\n--- a stalled RELOAD must keep the data it already had ---');
+/* The write-back case: Sigma re-runs the query, stalls part way, and the plugin used
+   to swap the partial buffer in anyway -- destroying a complete grid to show an
+   incomplete one. That is what made a card vanish right after a comment was saved. */
+autoSend = false;
+pages = fivePages(small);
+pager = null; timers = [];
+setConfig({ source: 'el-reload-stall', rowColumns: [ID.plate, ID.plex], pivotColumn: ID.stage,
+  valueColumns: [ID.ts, ID.op], colorColumn: ID.status, maxRows: '0', debug: true,
+  sortRowColumn: [], sortRowDesc: false, sortColumnColumn: [], sortColumnDesc: false });
+while (pager.next < pages.length) pager.send();
+var completeGrid = tbody.innerHTML;
+var completeCards = countPills(completeGrid);
+check('the first load is complete', diag('loadComplete'), true);
+check('and has cards', completeCards > 0, true);
+
+// Reload delivers only its first page, then goes silent forever.
+pages = [fivePages(small)[0]];
+pager.next = 0;
+pager.send();
+/* Nothing more will ever arrive. Drive the silence watchdog to exhaustion -- note
+   the queue must NOT be cleared here, since the watchdog lives in it. */
+for (var w = 0; w < 40 && !diag('reloadStalledAndWasDiscarded'); w++) flushTimers(1);
+check('the stalled reload was discarded', diag('reloadStalledAndWasDiscarded'), true);
+check('the complete grid is still on screen', countPills(tbody.innerHTML), completeCards);
+check('and the failure is stated', /Refresh did not finish/.test(root.innerHTML), true);
+check('it is not misreported as a truncated first load',
+  diag('loadStalledIncomplete'), false);
+autoSend = true;
+
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);
